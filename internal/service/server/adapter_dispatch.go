@@ -222,9 +222,23 @@ func (s *Server) handleWithAdapters(
 			prependCachedThinking(upstreamReq, sess)
 		}
 
+		finalizeAnthropicUpstream := func(_ context.Context, upstream any) (any, error) {
+			msgReq, err := normalizeAnthropicRequest(upstream)
+			if err != nil {
+				return nil, err
+			}
+			if wsMode == "enabled" {
+				injectAnthropicWebSearch(&msgReq)
+			}
+			if s.pluginRegistry != nil && sess != nil {
+				prependCachedThinking(&msgReq, sess)
+			}
+			return &msgReq, nil
+		}
+
 		// If streaming, use streaming path.
 		if openAIReq.Stream {
-			s.handleAdapterStream(w, r, ctx, openAIReq, coreReq, upstreamReq, preferred, wsInjected)
+			s.handleAdapterStream(w, r, ctx, openAIReq, coreReq, upstreamReq, preferred, wsMode, wsInjected)
 			record.OpenAIRequest = nil
 			return
 		}
@@ -259,7 +273,7 @@ func (s *Server) handleWithAdapters(
 
 		// Wrap with visual orchestrator at Core level if enabled for this model.
 		// This uses CoreProvider, which is protocol-agnostic.
-		if visProv := s.wrapWithVisual(ctx, openAIReq.Model, preferred, providerAdapter); visProv != nil {
+		if visProv := s.wrapWithVisual(ctx, openAIReq.Model, preferred, providerAdapter, finalizeAnthropicUpstream); visProv != nil {
 			var coreRespApi *format.CoreResponse
 			coreRespApi, err = visProv.CreateCore(ctx, coreReq)
 			if err == nil {
@@ -319,7 +333,7 @@ func (s *Server) handleWithAdapters(
 		}
 
 		if openAIReq.Stream {
-			s.handleAdapterStream(w, r, ctx, openAIReq, coreReq, chatReq, preferred, wsInjected)
+			s.handleAdapterStream(w, r, ctx, openAIReq, coreReq, chatReq, preferred, wsMode, wsInjected)
 			record.OpenAIRequest = nil
 			return
 		}
@@ -426,7 +440,7 @@ func (s *Server) handleWithAdapters(
 		}
 
 		if openAIReq.Stream {
-			s.handleAdapterStream(w, r, ctx, openAIReq, coreReq, googleReq, preferred, wsInjected)
+			s.handleAdapterStream(w, r, ctx, openAIReq, coreReq, googleReq, preferred, wsMode, wsInjected)
 			record.OpenAIRequest = nil
 			return
 		}
@@ -657,6 +671,7 @@ func (s *Server) handleAdapterStream(
 	coreReq *format.CoreRequest,
 	upstreamReq any,
 	candidate provider.ProviderCandidate,
+	wsMode string,
 	wsInjected bool,
 ) {
 	log := slog.Default().With("model", openAIReq.Model, "path", "adapter_stream")
@@ -722,7 +737,20 @@ func (s *Server) handleAdapterStream(
 
 		var visCoreProvider visualpkg.CoreProvider
 		if provAdapter, ok := s.adapterRegistry.GetProvider(candidate.Protocol); ok {
-			if visProv := s.wrapWithVisual(ctx, openAIReq.Model, candidate, provAdapter); visProv != nil {
+			finalizeAnthropicUpstream := func(_ context.Context, upstream any) (any, error) {
+				msgReq, err := normalizeAnthropicRequest(upstream)
+				if err != nil {
+					return nil, err
+				}
+				if wsMode == "enabled" {
+					injectAnthropicWebSearch(&msgReq)
+				}
+				if s.pluginRegistry != nil && sess != nil {
+					prependCachedThinking(&msgReq, sess)
+				}
+				return &msgReq, nil
+			}
+			if visProv := s.wrapWithVisual(ctx, openAIReq.Model, candidate, provAdapter, finalizeAnthropicUpstream); visProv != nil {
 				visCoreProvider = visProv
 			}
 		}
@@ -1360,16 +1388,31 @@ func (s *Server) handleAdapterStream(
 type adapterCoreProvider struct {
 	adapter format.ProviderAdapter
 	client  provider.ProviderClient
+	finalize func(ctx context.Context, upstream any) (any, error)
 }
 
 func newAdapterCoreProvider(adapter format.ProviderAdapter, client provider.ProviderClient) *adapterCoreProvider {
 	return &adapterCoreProvider{adapter: adapter, client: client}
 }
 
+func newFinalizingAdapterCoreProvider(
+	adapter format.ProviderAdapter,
+	client provider.ProviderClient,
+	finalize func(ctx context.Context, upstream any) (any, error),
+) *adapterCoreProvider {
+	return &adapterCoreProvider{adapter: adapter, client: client, finalize: finalize}
+}
+
 func (p *adapterCoreProvider) CreateCore(ctx context.Context, req *format.CoreRequest) (*format.CoreResponse, error) {
 	upstreamAny, err := p.adapter.FromCoreRequest(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+	if p.finalize != nil {
+		upstreamAny, err = p.finalize(ctx, upstreamAny)
+		if err != nil {
+			return nil, err
+		}
 	}
 	rawResp, err := p.client.CreateMessage(ctx, upstreamAny)
 	if err != nil {
@@ -1559,6 +1602,7 @@ func (s *Server) wrapWithVisual(
 	modelAlias string,
 	preferred provider.ProviderCandidate,
 	providerAdapter format.ProviderAdapter,
+	finalizeUpstream func(ctx context.Context, upstream any) (any, error),
 ) visualpkg.CoreProvider {
 	pm := s.activeProviderManager()
 	if s.pluginRegistry == nil || s.runtime == nil || modelAlias == "" || pm == nil {
@@ -1578,7 +1622,7 @@ func (s *Server) wrapWithVisual(
 	}
 
 	// Upstream CoreProvider = adapter + client.
-	upstreamCP := newAdapterCoreProvider(providerAdapter, effectiveClient)
+	upstreamCP := newFinalizingAdapterCoreProvider(providerAdapter, effectiveClient, finalizeUpstream)
 
 	// Visual provider CoreProvider.
 	visClient, err := pm.ClientForKey(visCfg.Provider)
@@ -1599,6 +1643,20 @@ func (s *Server) wrapWithVisual(
 	visCP := newAdapterCoreProvider(visAdapter, visClient)
 
 	return visualpkg.NewCoreBridge(upstreamCP, visCP, visCfg.Model, visCfg.MaxRounds, visCfg.MaxTokens)
+}
+
+func normalizeAnthropicRequest(upstream any) (anthropic.MessageRequest, error) {
+	switch v := upstream.(type) {
+	case anthropic.MessageRequest:
+		return v, nil
+	case *anthropic.MessageRequest:
+		if v == nil {
+			return anthropic.MessageRequest{}, fmt.Errorf("expected anthropic.MessageRequest, got nil *anthropic.MessageRequest")
+		}
+		return *v, nil
+	default:
+		return anthropic.MessageRequest{}, fmt.Errorf("expected anthropic.MessageRequest, got %T", upstream)
+	}
 }
 
 // injectCoreWebSearch replaces web_search tools in coreReq.Tools with injected

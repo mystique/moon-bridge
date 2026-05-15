@@ -871,3 +871,110 @@ func TestCoreOrchestratorIsolatesRequestsAcrossRounds(t *testing.T) {
 		t.Fatalf("tool_result message content = %+v", toolResultMsg.Content)
 	}
 }
+
+type finalizingCoreUpstream struct {
+	responses []*format.CoreResponse
+	requests  []*format.CoreRequest
+	finalize  func(*format.CoreRequest)
+}
+
+func (f *finalizingCoreUpstream) CreateCore(_ context.Context, req *format.CoreRequest) (*format.CoreResponse, error) {
+	cloned := cloneCoreRequest(req)
+	if f.finalize != nil {
+		f.finalize(cloned)
+	}
+	f.requests = append(f.requests, cloned)
+	if len(f.responses) == 0 {
+		return nil, io.EOF
+	}
+	resp := f.responses[0]
+	f.responses = f.responses[1:]
+	return resp, nil
+}
+
+func TestCoreOrchestratorPreservesFinalizedAssistantHistoryAcrossRounds(t *testing.T) {
+	upstream := &finalizingCoreUpstream{
+		finalize: func(req *format.CoreRequest) {
+			for i := range req.Messages {
+				msg := &req.Messages[i]
+				if msg.Role != "assistant" || len(msg.Content) == 0 {
+					continue
+				}
+				hasToolUse := false
+				hasReasoning := false
+				for _, block := range msg.Content {
+					if block.Type == "tool_use" {
+						hasToolUse = true
+					}
+					if block.Type == "reasoning" {
+						hasReasoning = true
+					}
+				}
+				if hasToolUse && !hasReasoning {
+					msg.Content = append([]format.CoreContentBlock{{
+						Type:               "reasoning",
+						ReasoningText:      "replayed thinking",
+						ReasoningSignature: "sig-visual",
+					}}, msg.Content...)
+				}
+			}
+		},
+		responses: []*format.CoreResponse{
+			{
+				ID: "turn1", Status: "completed", StopReason: "tool_use",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{
+						Type: "tool_use", ToolUseID: "toolu_1", ToolName: ToolVisualBrief,
+						ToolInput: json.RawMessage(`{"image_refs":["Image #1"],"context":"describe"}`),
+					}},
+				}},
+			},
+			{
+				ID: "turn2", Status: "completed", StopReason: "end_turn",
+				Messages: []format.CoreMessage{{
+					Role:    "assistant",
+					Content: []format.CoreContentBlock{{Type: "text", Text: "done"}},
+				}},
+			},
+		},
+	}
+	vision := &fakeCoreVisionClient{text: "visual analysis result"}
+	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
+		Upstream:  upstream,
+		Client:    vision,
+		MaxRounds: 5,
+	})
+
+	_, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
+		Model: "test-model",
+		Messages: []format.CoreMessage{{
+			Role: "user",
+			Content: []format.CoreContentBlock{
+				{Type: "text", Text: "look"},
+				{Type: "image", ImageData: "b64_image_1", MediaType: "image/png"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateCore() error = %v", err)
+	}
+
+	if len(upstream.requests) != 2 {
+		t.Fatalf("upstream requests = %d, want 2", len(upstream.requests))
+	}
+	secondReq := upstream.requests[1]
+	if len(secondReq.Messages) != 3 {
+		t.Fatalf("second upstream request messages = %d, want 3; got %+v", len(secondReq.Messages), secondReq.Messages)
+	}
+	assistantMsg := secondReq.Messages[1]
+	if len(assistantMsg.Content) < 2 {
+		t.Fatalf("assistant history content too short: %+v", assistantMsg.Content)
+	}
+	if assistantMsg.Content[0].Type != "reasoning" || assistantMsg.Content[0].ReasoningText != "replayed thinking" || assistantMsg.Content[0].ReasoningSignature != "sig-visual" {
+		t.Fatalf("assistant history lost finalized reasoning block: %+v", assistantMsg.Content)
+	}
+	if assistantMsg.Content[1].Type != "tool_use" || assistantMsg.Content[1].ToolUseID != "toolu_1" {
+		t.Fatalf("assistant tool_use misplaced after finalized reasoning: %+v", assistantMsg.Content)
+	}
+}
