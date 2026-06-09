@@ -326,7 +326,9 @@ func (a *AnthropicProviderAdapter) FromCoreRequest(ctx context.Context, req *for
 	if req.ToolChoice != nil {
 		tc := a.toAnthropicToolChoice(*req.ToolChoice)
 		anthropicReq.ToolChoice = &tc
-	} else {
+	} else if len(anthropicReq.Tools) > 0 {
+		// Only set tool_choice to auto if there are tools defined.
+		// Otherwise, upstream providers like DashScope will reject the request.
 		anthropicReq.ToolChoice = &ToolChoice{Type: "auto"}
 	}
 
