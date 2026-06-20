@@ -12,6 +12,7 @@ import (
 
 	"moonbridge/internal/config"
 	"moonbridge/internal/extension/plugin"
+	"moonbridge/internal/format"
 	"moonbridge/internal/logger"
 	"moonbridge/internal/protocol/openai"
 	"moonbridge/internal/service/provider"
@@ -61,6 +62,13 @@ func (server *Server) handleResponses(writer http.ResponseWriter, request *http.
 	}
 
 	server.sessionForRequest(request)
+
+	// Inject the caller's User-Agent into the request context so protocol
+	// clients on the adapter dispatch path can propagate it to upstream
+	// providers instead of using the statically configured default.
+	if ua := request.Header.Get("User-Agent"); ua != "" {
+		request = request.WithContext(format.WithRequestUserAgent(request.Context(), ua))
+	}
 
 	body, err := io.ReadAll(request.Body)
 	record := mbtrace.Record{HTTPRequest: mbtrace.NewHTTPRequest(request), OpenAIRequest: mbtrace.RawJSONOrString(body)}

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"moonbridge/internal/format"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -163,8 +164,12 @@ func (c *Client) newRequest(ctx context.Context, req *ChatRequest) (*http.Reques
 	}
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("authorization", "Bearer "+c.apiKey)
-	if c.userAgent != "" {
-		httpReq.Header.Set("user-agent", c.userAgent)
+	ua := c.userAgent
+	if reqUA := format.RequestUserAgentFromContext(ctx); reqUA != "" {
+		ua = reqUA
+	}
+	if ua != "" {
+		httpReq.Header.Set("user-agent", ua)
 	}
 	return httpReq, nil
 }

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"moonbridge/internal/format"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -273,8 +274,12 @@ func (c *Client) newRequest(ctx context.Context, model, action string, req *Gene
 		return nil, fmt.Errorf("google API request build: %w", err)
 	}
 	httpReq.Header.Set("content-type", "application/json")
-	if c.userAgent != "" {
-		httpReq.Header.Set("user-agent", c.userAgent)
+	ua := c.userAgent
+	if reqUA := format.RequestUserAgentFromContext(ctx); reqUA != "" {
+		ua = reqUA
+	}
+	if ua != "" {
+		httpReq.Header.Set("user-agent", ua)
 	}
 	if c.project != "" && c.apiKey != "" {
 		// Vertex AI uses Bearer token (APIKey field holds the OAuth token)

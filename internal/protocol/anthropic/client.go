@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"moonbridge/internal/format"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -209,8 +210,12 @@ func (client *Client) newRequest(ctx context.Context, messageRequest MessageRequ
 	if client.version != "" {
 		httpRequest.Header.Set("anthropic-version", client.version)
 	}
-	if client.userAgent != "" {
-		httpRequest.Header.Set("user-agent", client.userAgent)
+	ua := client.userAgent
+	if reqUA := format.RequestUserAgentFromContext(ctx); reqUA != "" {
+		ua = reqUA
+	}
+	if ua != "" {
+		httpRequest.Header.Set("user-agent", ua)
 	}
 	return httpRequest, nil
 }
