@@ -170,6 +170,16 @@ func (s *Server) handleWithAdapters(
 	// the upstream provider receives the correct model identifier.
 	coreReq.Model = preferred.UpstreamModel
 
+	// When the client (e.g. Codex) does not send max_output_tokens, fall back
+	// to the model's max_output_tokens metadata before the global default.
+	// This lets each model declare its own output limit instead of relying on
+	// a single defaults.max_tokens value that may exceed some models' limits.
+	if coreReq.MaxTokens == 0 {
+		if meta, ok := pm.ModelMetaFor(preferred.UpstreamModel, preferred.ProviderKey); ok && meta.MaxOutputTokens > 0 {
+			coreReq.MaxTokens = meta.MaxOutputTokens
+		}
+	}
+
 	wsMode := resolvedWebSearchMode(pm, openAIReq.Model, preferred)
 
 	// Inject web search tools at Core level if mode is "injected".
