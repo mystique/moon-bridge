@@ -1149,6 +1149,22 @@ func cleanSchema(schema map[string]any) map[string]any {
 			result[k] = v
 		}
 	}
+	// Defensive: deduplicate "required" arrays to satisfy JSON Schema
+	// validators that enforce uniqueItems (e.g. Anthropic API).
+	if req, ok := result["required"].([]any); ok {
+		seen := make(map[string]struct{}, len(req))
+		deduped := make([]any, 0, len(req))
+		for _, item := range req {
+			if s, ok := item.(string); ok {
+				if _, dup := seen[s]; dup {
+					continue
+				}
+				seen[s] = struct{}{}
+			}
+			deduped = append(deduped, item)
+		}
+		result["required"] = deduped
+	}
 	if len(result) == 0 {
 		return nil
 	}

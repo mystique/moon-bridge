@@ -64,6 +64,9 @@ func buildNestedOneOf(toolNames []string, toolMap map[string]format.CoreTool, na
 			if r, ok := sub.InputSchema["required"].([]any); ok {
 				for _, rv := range r {
 					if rs, ok := rv.(string); ok {
+						if rs == "action" {
+							continue // already added above; avoid duplicate
+						}
 						required = append(required, rs)
 					}
 				}
@@ -221,6 +224,64 @@ func DecodeNestedCall(input json.RawMessage, schemaKind ToolKind) (action string
 	default:
 		return action, input, nil
 	}
+}
+
+// EncodeNamespacedHistoryCall reconstructs the upstream-facing tool_use name and
+// input for a historical Codex function_call that carries a namespace.
+//
+// It is the inverse of the response-side decoding (DecodeNestedCall / the flat
+// name split done by OutputItemFromBlock): given the Codex-side triple
+// (name, namespace, arguments) that Codex echoes back in conversation history,
+// it produces the (toolName, toolInput) the upstream provider originally saw,
+// so multi-turn history stays consistent with the registered tools.
+//
+//   - Flat:        upstream name = "<namespace>_<name>", input unchanged.
+//   - NestedOneOf: upstream name = "<namespace>", input = {"action": name, ...args}.
+//   - NestedAnyOf: upstream name = "<namespace>", input = {"action": name, "params": args}.
+//
+// When namespace is empty the call is not namespaced and is returned as-is.
+func EncodeNamespacedHistoryCall(namespace, name string, input json.RawMessage, strategy NamespaceStrategy) (string, json.RawMessage) {
+	if namespace == "" {
+		return name, input
+	}
+	switch strategy {
+	case Flat:
+		return NamespacedToolName(namespace, name), normalizeToolInput(input)
+	case NestedAnyOf:
+		return namespace, wrapActionParams(name, input)
+	default: // NestedOneOf
+		return namespace, mergeActionIntoObject(name, input)
+	}
+}
+
+// normalizeToolInput ensures a non-empty object body, defaulting to "{}".
+func normalizeToolInput(input json.RawMessage) json.RawMessage {
+	if len(input) == 0 || string(input) == "null" {
+		return json.RawMessage(`{}`)
+	}
+	return input
+}
+
+// mergeActionIntoObject produces the NestedOneOf shape: {"action": name, ...input}.
+func mergeActionIntoObject(name string, input json.RawMessage) json.RawMessage {
+	obj := make(map[string]json.RawMessage)
+	if json.Valid(input) {
+		_ = json.Unmarshal(input, &obj)
+	}
+	actionJSON, _ := json.Marshal(name)
+	obj["action"] = actionJSON
+	out, _ := json.Marshal(obj)
+	return out
+}
+
+// wrapActionParams produces the NestedAnyOf shape: {"action": name, "params": input}.
+func wrapActionParams(name string, input json.RawMessage) json.RawMessage {
+	actionJSON, _ := json.Marshal(name)
+	out, _ := json.Marshal(map[string]json.RawMessage{
+		"action": actionJSON,
+		"params": normalizeToolInput(input),
+	})
+	return out
 }
 
 // tryExtractAction scans partial JSON for "action": "value" and returns the value.

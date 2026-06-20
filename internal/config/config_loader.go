@@ -101,9 +101,10 @@ type LogFileConfig struct {
 }
 
 type DefaultsFileConfig struct {
-	Model        string `yaml:"model" json:"model"`
-	MaxTokens    int    `yaml:"max_tokens" json:"max_tokens,omitempty"`
-	SystemPrompt string `yaml:"system_prompt" json:"system_prompt,omitempty"`
+	Model            string `yaml:"model" json:"model"`
+	MaxTokens        int    `yaml:"max_tokens" json:"max_tokens,omitempty"`
+	SystemPrompt     string `yaml:"system_prompt" json:"system_prompt,omitempty"`
+	NamespaceStrategy string `yaml:"namespace_strategy" json:"namespace_strategy,omitempty"`
 }
 
 type ModelDefFileConfig struct {
@@ -406,9 +407,10 @@ func FromFileConfigWithOptions(fileConfig FileConfig, opts LoadOptions) (Config,
 
 	// Defaults.
 	defaults := Defaults{
-		Model:        strings.TrimSpace(fileConfig.Defaults.Model),
-		MaxTokens:    fileConfig.Defaults.MaxTokens,
-		SystemPrompt: strings.TrimSpace(fileConfig.Defaults.SystemPrompt),
+		Model:             strings.TrimSpace(fileConfig.Defaults.Model),
+		MaxTokens:         fileConfig.Defaults.MaxTokens,
+		SystemPrompt:      strings.TrimSpace(fileConfig.Defaults.SystemPrompt),
+		NamespaceStrategy: strings.TrimSpace(fileConfig.Defaults.NamespaceStrategy),
 	}
 
 	// Models (top-level).

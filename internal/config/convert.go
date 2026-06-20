@@ -23,9 +23,10 @@ func (cfg Config) ToFileConfig() FileConfig {
 			SessionTTL:  cfg.SessionTTL,
 		},
 		Defaults: DefaultsFileConfig{
-			Model:        cfg.Defaults.Model,
-			MaxTokens:    cfg.Defaults.MaxTokens,
-			SystemPrompt: cfg.Defaults.SystemPrompt,
+			Model:             cfg.Defaults.Model,
+			MaxTokens:         cfg.Defaults.MaxTokens,
+			SystemPrompt:      cfg.Defaults.SystemPrompt,
+			NamespaceStrategy: cfg.Defaults.NamespaceStrategy,
 		},
 		WebSearch: WebSearchFileConfig{
 			Support:         string(cfg.WebSearchSupport),

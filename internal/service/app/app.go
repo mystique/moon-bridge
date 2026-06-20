@@ -209,7 +209,12 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 	coreHooks := plugins.CorePluginHooks()
 
 	// Inbound: OpenAI Responses client adapter.
-	oaiAdapter := openai.NewOpenAIAdapter(coreHooks, codextool.NestedOneOf)
+	// Flat is the default namespace strategy: each MCP/namespace sub-tool is
+	// exposed as an independent function tool with a simple object schema. This
+	// avoids the top-level oneOf/anyOf schemas that some upstream models can't
+	// call reliably (they emit empty input, which then gets dropped), and keeps
+	// multi-turn history consistent without action-decoding on the stream path.
+	oaiAdapter := openai.NewOpenAIAdapter(coreHooks, resolveNamespaceStrategy(cfg.Defaults.NamespaceStrategy))
 	_ = adapterReg.RegisterClient(oaiAdapter)
 	_ = adapterReg.RegisterClientStream(oaiAdapter)
 
@@ -625,6 +630,19 @@ func captureAnthropicTraceConfig(enabled bool) mbtrace.Config {
 	return mbtrace.Config{
 		Enabled: enabled,
 		Root:    filepath.Join(mbtrace.DefaultRoot, "Capture", "Anthropic"),
+	}
+}
+
+// resolveNamespaceStrategy maps the configured namespace strategy string to a
+// codextool.NamespaceStrategy. Unknown or empty values fall back to Flat, the
+// safe default that keeps MCP tools callable across upstreams that reject
+// top-level oneOf/anyOf tool schemas.
+func resolveNamespaceStrategy(raw string) codextool.NamespaceStrategy {
+	switch codextool.NamespaceStrategy(raw) {
+	case codextool.NestedOneOf, codextool.NestedAnyOf, codextool.Flat:
+		return codextool.NamespaceStrategy(raw)
+	default:
+		return codextool.Flat
 	}
 }
 

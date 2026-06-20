@@ -95,6 +95,15 @@ cache:
 defaults:
   model: "moonbridge"
   max_tokens: 65536
+  # How Codex namespace tools (e.g. MCP servers, exposed as mcp__<server>) are
+  # translated into upstream tools.
+  #   flat          (default) each sub-tool becomes an independent function tool
+  #                  with a simple object schema — most compatible across upstreams
+  #   nested_oneof  one tool per namespace, input_schema uses top-level oneOf
+  #   nested_anyof  one tool per namespace, action enum + params anyOf
+  # Flat is recommended: some upstreams/models fail to call oneOf/anyOf tools
+  # reliably (empty input) and the flat path keeps multi-turn history consistent.
+  namespace_strategy: "flat"
 trace:
   enabled: false
 proxy:

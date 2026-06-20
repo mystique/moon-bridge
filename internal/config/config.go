@@ -185,9 +185,10 @@ type ModelPricing struct {
 
 // Defaults holds the default configuration values.
 type Defaults struct {
-	Model        string
-	MaxTokens    int
-	SystemPrompt string
+	Model            string
+	MaxTokens        int
+	SystemPrompt     string
+	NamespaceStrategy string
 }
 
 // ModelDef holds model metadata (without per-provider pricing).

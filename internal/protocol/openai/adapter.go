@@ -87,7 +87,7 @@ func (a *OpenAIAdapter) ToCoreRequest(ctx context.Context, req any) (*format.Cor
 	openaiReq.Input = preprocessed
 
 	// 2. Parse Input → Messages + System.
-	messages, system, err := convertInput(openaiReq.Input, openaiReq.Model)
+	messages, system, err := convertInput(openaiReq.Input, openaiReq.Model, a.nsStrategy)
 	if err != nil {
 		return nil, fmt.Errorf("invalid input: %w", err)
 	}
@@ -1107,6 +1107,7 @@ type inputItem struct {
 	Summary   json.RawMessage `json:"summary"`
 	CallID    string          `json:"call_id"`
 	Name      string          `json:"name"`
+	Namespace string          `json:"namespace"`
 	Arguments string          `json:"arguments"`
 	Output    json.RawMessage `json:"output"`
 	Input     string          `json:"input"`
@@ -1125,7 +1126,7 @@ type inputItem struct {
 //     from function_call items).
 //   - Items with tool-call output types → tool_result user messages.
 //   - Items with tool-call input types → tool_use within assistant messages.
-func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []format.CoreContentBlock, error) {
+func convertInput(raw json.RawMessage, model string, nsStrategy codextool.NamespaceStrategy) ([]format.CoreMessage, []format.CoreContentBlock, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil, nil
 	}
@@ -1259,10 +1260,18 @@ func convertInput(raw json.RawMessage, model string) ([]format.CoreMessage, []fo
 			if !json.Valid([]byte(item.Arguments)) {
 				toolInput = json.RawMessage(`{}`)
 			}
+			// Historical namespaced calls (e.g. MCP tools) arrive with a
+			// namespace plus the bare sub-tool name. Reconstruct the upstream-
+			// facing tool_use so multi-turn history matches the registered
+			// tools (otherwise the upstream rejects with 400 on name mismatch).
+			toolName := item.Name
+			if item.Namespace != "" {
+				toolName, toolInput = codextool.EncodeNamespacedHistoryCall(item.Namespace, item.Name, toolInput, nsStrategy)
+			}
 			pendingFCBlocks = append(pendingFCBlocks, format.CoreContentBlock{
 				Type:      "tool_use",
 				ToolUseID: firstNonEmpty(item.CallID, item.ID),
-				ToolName:  item.Name,
+				ToolName:  toolName,
 				ToolInput: toolInput,
 			})
 
@@ -1823,7 +1832,18 @@ func buildToolOutputItemStreaming(block *format.CoreContentBlock, extensions map
 // Custom tools are expanded using codex package helpers.
 // Namespace tools are recursively flattened.
 func convertToolWithNamespace(tool Tool, namespace string, disablePatchProxy func(string) bool, nsStrategy codextool.NamespaceStrategy) []format.CoreTool {
+	// Skip malformed tools with neither type nor name (e.g. client-side
+	// discovery helpers that should not be forwarded to upstream providers).
+	if tool.Type == "" && tool.Name == "" {
+		return nil
+	}
+
 	name := namespacedToolName(namespace, tool.Name)
+	// For tools that have a type but no name (e.g. custom OpenAI tool types
+	// not explicitly handled above), fall back to the type as the name.
+	if name == "" {
+		name = tool.Type
+	}
 	ext := make(map[string]any)
 
 	switch tool.Type {
@@ -1955,6 +1975,11 @@ func flattenToolsWithNamespace(openaiTools []Tool, namespace string, disablePatc
 	seen := make(map[string]int, len(result)) // name → index in deduped
 	deduped := make([]format.CoreTool, 0, len(result))
 	for _, t := range result {
+		// Drop any tool that resolved to an empty name: strict upstream schemas
+		// (e.g. DeepSeek V4 / GLM) reject "Invalid tools[N].name: empty string".
+		if t.Name == "" {
+			continue
+		}
 		if existing, exists := seen[t.Name]; exists {
 			existingNS, _ := deduped[existing].Extensions["codex_namespace"].(string)
 			newNS, _ := t.Extensions["codex_namespace"].(string)

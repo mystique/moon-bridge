@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"moonbridge/internal/extension/codextool"
 	"moonbridge/internal/format"
 	"moonbridge/internal/protocol/openai"
 )
@@ -257,6 +258,59 @@ func TestToCoreRequest_KeepsToolUseAdjacentToToolResultWhenReasoningPrecedesOutp
 	}
 	if len(toolResult.Content) != 1 || toolResult.Content[0].Type != "tool_result" || toolResult.Content[0].ToolUseID != "call_1" {
 		t.Fatalf("tool result message=%+v", toolResult)
+	}
+}
+
+func TestToCoreRequest_NamespacedHistoryCallReconstructed(t *testing.T) {
+	// Codex echoes past MCP/namespace tool calls back with a "namespace" plus the
+	// bare sub-tool name. The bridge must rebuild the upstream-facing tool_use so
+	// multi-turn history matches the registered tool (otherwise the upstream 400s
+	// on a name mismatch). The expected shape depends on the namespace strategy.
+	tests := []struct {
+		name     string
+		strategy codextool.NamespaceStrategy
+		wantName string
+		wantIn   string
+	}{
+		{"flat", codextool.Flat, "mcp__fs_read", `{"path":"/etc/hosts"}`},
+		{"nested_oneof", codextool.NestedOneOf, "mcp__fs", `{"action":"read","path":"/etc/hosts"}`},
+		{"nested_anyof", codextool.NestedAnyOf, "mcp__fs", `{"action":"read","params":{"path":"/etc/hosts"}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter := openai.NewOpenAIAdapter(format.CorePluginHooks{}, tc.strategy)
+			req := &openai.ResponsesRequest{
+				Model: "gpt-5.4",
+				Input: json.RawMessage(`[
+					{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","namespace":"mcp__fs","arguments":"{\"path\":\"/etc/hosts\"}"},
+					{"type":"function_call_output","call_id":"call_1","output":"ok"}
+				]`),
+			}
+			result, err := adapter.ToCoreRequest(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var toolUse *format.CoreContentBlock
+			for i := range result.Messages {
+				for j := range result.Messages[i].Content {
+					if result.Messages[i].Content[j].Type == "tool_use" {
+						toolUse = &result.Messages[i].Content[j]
+					}
+				}
+			}
+			if toolUse == nil {
+				t.Fatalf("no tool_use block found; messages=%+v", result.Messages)
+			}
+			if toolUse.ToolName != tc.wantName {
+				t.Fatalf("ToolName=%q, want %q", toolUse.ToolName, tc.wantName)
+			}
+			if got := string(toolUse.ToolInput); got != tc.wantIn {
+				t.Fatalf("ToolInput=%s, want %s", got, tc.wantIn)
+			}
+			if toolUse.ToolUseID != "call_1" {
+				t.Fatalf("ToolUseID=%q, want call_1", toolUse.ToolUseID)
+			}
+		})
 	}
 }
 

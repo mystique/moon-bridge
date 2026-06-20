@@ -85,3 +85,49 @@ func TestRebuildGrammarUsesRawInputForGenericCustomTools(t *testing.T) {
 		t.Fatalf("RebuildGrammar() = %q, want raw input", got)
 	}
 }
+
+func TestEncodeNamespacedHistoryCall(t *testing.T) {
+	args := json.RawMessage(`{"path":"/etc/hosts"}`)
+
+	tests := []struct {
+		name      string
+		strategy  NamespaceStrategy
+		wantName  string
+		wantInput string
+	}{
+		{"flat", Flat, "mcp__fs_read", `{"path":"/etc/hosts"}`},
+		{"nested_oneof", NestedOneOf, "mcp__fs", `{"action":"read","path":"/etc/hosts"}`},
+		{"nested_anyof", NestedAnyOf, "mcp__fs", `{"action":"read","params":{"path":"/etc/hosts"}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotName, gotInput := EncodeNamespacedHistoryCall("mcp__fs", "read", args, tc.strategy)
+			if gotName != tc.wantName {
+				t.Fatalf("name = %q, want %q", gotName, tc.wantName)
+			}
+			if string(gotInput) != tc.wantInput {
+				t.Fatalf("input = %s, want %s", string(gotInput), tc.wantInput)
+			}
+		})
+	}
+}
+
+func TestEncodeNamespacedHistoryCallEmptyNamespacePassesThrough(t *testing.T) {
+	args := json.RawMessage(`{"x":1}`)
+	gotName, gotInput := EncodeNamespacedHistoryCall("", "plain", args, Flat)
+	if gotName != "plain" || string(gotInput) != `{"x":1}` {
+		t.Fatalf("got name=%q input=%s, want passthrough", gotName, string(gotInput))
+	}
+}
+
+func TestEncodeNamespacedHistoryCallNormalizesEmptyInput(t *testing.T) {
+	// Flat with empty input → "{}"; NestedAnyOf wraps params as "{}".
+	gotName, gotInput := EncodeNamespacedHistoryCall("mcp__fs", "read", json.RawMessage(`{}`), Flat)
+	if gotName != "mcp__fs_read" || string(gotInput) != `{}` {
+		t.Fatalf("flat empty: name=%q input=%s", gotName, string(gotInput))
+	}
+	gotName, gotInput = EncodeNamespacedHistoryCall("mcp__fs", "read", json.RawMessage(``), NestedAnyOf)
+	if gotName != "mcp__fs" || string(gotInput) != `{"action":"read","params":{}}` {
+		t.Fatalf("anyof empty: name=%q input=%s", gotName, string(gotInput))
+	}
+}
