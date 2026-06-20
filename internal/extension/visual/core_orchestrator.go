@@ -2,6 +2,7 @@ package visual
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -25,12 +26,55 @@ type CoreOrchestrator struct {
 	upstream  CoreUpstreamProvider
 	client    VisionClient
 	maxRounds int
+	observer  CoreTraceObserver
 }
 
 type CoreOrchestratorConfig struct {
 	Upstream  CoreUpstreamProvider
 	Client    VisionClient
 	MaxRounds int
+	Observer  CoreTraceObserver
+}
+
+type CoreTraceObserver interface {
+	RecordVisualEvent(event CoreTraceEvent)
+}
+
+type CoreTraceEvent struct {
+	Stage        string
+	Round        int
+	ImageCount   int
+	Images       []CoreTraceImage
+	Request      CoreTraceRequestSummary
+	Response     CoreTraceResponseSummary
+	ToolName     string
+	ToolUseID    string
+	PromptLength int
+	ResultLength int
+	Result       string
+	OutputTypes  []string
+}
+
+type CoreTraceImage struct {
+	Index    int    `json:"index"`
+	MimeType string `json:"mime_type,omitempty"`
+	Bytes    int    `json:"bytes,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
+	URL      string `json:"url,omitempty"`
+}
+
+type CoreTraceRequestSummary struct {
+	MessageCount   int  `json:"message_count"`
+	ToolCount      int  `json:"tool_count"`
+	HasImageBlocks bool `json:"has_image_blocks"`
+}
+
+type CoreTraceResponseSummary struct {
+	StopReason   string   `json:"stop_reason,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	ContentTypes []string `json:"content_types,omitempty"`
+	TextLength   int      `json:"text_length,omitempty"`
+	ToolUseNames []string `json:"tool_use_names,omitempty"`
 }
 
 // NewCoreOrchestrator creates a CoreOrchestrator.
@@ -43,6 +87,7 @@ func NewCoreOrchestrator(cfg CoreOrchestratorConfig) *CoreOrchestrator {
 		upstream:  cfg.Upstream,
 		client:    cfg.Client,
 		maxRounds: maxRounds,
+		observer:  cfg.Observer,
 	}
 }
 
@@ -58,6 +103,12 @@ func (o *CoreOrchestrator) CreateCore(ctx context.Context, req *format.CoreReque
 	}
 	req = cloneCoreRequest(req)
 	req, availableImages := prepareCoreRequestForVisual(req)
+	o.recordVisualEvent(CoreTraceEvent{
+		Stage:      "prepare_core_request",
+		ImageCount: len(availableImages),
+		Images:     summarizeCoreTraceImages(availableImages),
+		Request:    summarizeCoreRequest(req),
+	})
 	log := slog.Default()
 	aggregatedUsage := format.CoreUsage{}
 	hasAggregatedUsage := false
@@ -75,10 +126,23 @@ func (o *CoreOrchestrator) CreateCore(ctx context.Context, req *format.CoreReque
 			hasAggregatedUsage = true
 			aggregateCoreUsage(&aggregatedUsage, resp.Usage)
 		}
+		o.recordVisualEvent(CoreTraceEvent{
+			Stage:    "main_model_round",
+			Round:    round + 1,
+			Request:  summarizeCoreRequest(roundReq),
+			Response: summarizeCoreResponse(resp),
+		})
 
 		// If not a tool_use stop, we're done.
 		if resp.StopReason != "tool_use" {
-			return applyCoreUsageAggregation(resp, aggregatedUsage, hasAggregatedUsage), nil
+			resp = applyCoreUsageAggregation(resp, aggregatedUsage, hasAggregatedUsage)
+			o.recordVisualEvent(CoreTraceEvent{
+				Stage:       "completed",
+				Result:      coreResponseResult(resp),
+				OutputTypes: coreResponseOutputTypes(resp),
+				Response:    summarizeCoreResponse(resp),
+			})
+			return resp, nil
 		}
 
 		// Find visual tool uses in the last assistant message.
@@ -263,22 +327,191 @@ func coreSplitVisualToolUses(blocks []format.CoreContentBlock) (visualUses, nonV
 func (o *CoreOrchestrator) executeCoreVisualTool(ctx context.Context, toolUse format.CoreContentBlock, availableImages []ImageInput) string {
 	request, err := coreAnalysisRequestFromToolUse(toolUse, availableImages)
 	if err != nil {
-		return "Visual error: " + err.Error()
+		result := "Visual error: " + err.Error()
+		o.recordVisualEvent(CoreTraceEvent{
+			Stage:        "visual_tool",
+			ToolName:     toolUse.ToolName,
+			ToolUseID:    toolUse.ToolUseID,
+			ImageCount:   0,
+			Result:       "error",
+			ResultLength: len(result),
+		})
+		return result
 	}
 	result, err := o.client.Analyze(ctx, request)
 	if err != nil {
 		slog.Default().Warn("Visual tool execution failed", "tool", toolUse.ToolName, "error", err)
-		return "Visual error: " + err.Error()
+		formatted := "Visual error: " + err.Error()
+		o.recordVisualEvent(CoreTraceEvent{
+			Stage:        "visual_tool",
+			ToolName:     toolUse.ToolName,
+			ToolUseID:    toolUse.ToolUseID,
+			ImageCount:   len(request.Images),
+			PromptLength: len(request.Prompt),
+			Result:       "error",
+			ResultLength: len(formatted),
+		})
+		return formatted
 	}
 	slog.Default().Info("Visual tool executed", "tool", toolUse.ToolName, "images", len(request.Images))
+	formatted := strings.TrimSpace(result)
 	switch toolUse.ToolName {
 	case ToolVisualBrief:
-		return "Visual Brief result:\n" + strings.TrimSpace(result)
+		formatted = "Visual Brief result:\n" + formatted
 	case ToolVisualQA:
-		return "Visual QA result:\n" + strings.TrimSpace(result)
-	default:
-		return strings.TrimSpace(result)
+		formatted = "Visual QA result:\n" + formatted
 	}
+	o.recordVisualEvent(CoreTraceEvent{
+		Stage:        "visual_tool",
+		ToolName:     toolUse.ToolName,
+		ToolUseID:    toolUse.ToolUseID,
+		ImageCount:   len(request.Images),
+		PromptLength: len(request.Prompt),
+		Result:       "ok",
+		ResultLength: len(formatted),
+	})
+	return formatted
+}
+
+func (o *CoreOrchestrator) recordVisualEvent(event CoreTraceEvent) {
+	if o != nil && o.observer != nil {
+		o.observer.RecordVisualEvent(event)
+	}
+}
+
+func summarizeCoreTraceImages(images []ImageInput) []CoreTraceImage {
+	out := make([]CoreTraceImage, 0, len(images))
+	for i, image := range images {
+		item := CoreTraceImage{
+			Index:    i + 1,
+			MimeType: image.MimeType,
+			URL:      image.URL,
+		}
+		if image.Data != "" {
+			item.Bytes = len(image.Data)
+			sum := sha256.Sum256([]byte(image.Data))
+			item.SHA256 = fmt.Sprintf("%x", sum[:])
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func summarizeCoreRequest(req *format.CoreRequest) CoreTraceRequestSummary {
+	if req == nil {
+		return CoreTraceRequestSummary{}
+	}
+	summary := CoreTraceRequestSummary{
+		MessageCount: len(req.Messages),
+		ToolCount:    len(req.Tools),
+	}
+	for _, msg := range req.Messages {
+		for _, block := range msg.Content {
+			if block.Type == "image" || blockHasImage(block) {
+				summary.HasImageBlocks = true
+				return summary
+			}
+		}
+	}
+	return summary
+}
+
+func blockHasImage(block format.CoreContentBlock) bool {
+	for _, child := range block.ToolResultContent {
+		if child.Type == "image" || blockHasImage(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeCoreResponse(resp *format.CoreResponse) CoreTraceResponseSummary {
+	if resp == nil {
+		return CoreTraceResponseSummary{}
+	}
+	summary := CoreTraceResponseSummary{
+		StopReason: resp.StopReason,
+		Status:     resp.Status,
+	}
+	for _, msg := range resp.Messages {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, block := range msg.Content {
+			summary.ContentTypes = append(summary.ContentTypes, block.Type)
+			if block.Type == "text" {
+				summary.TextLength += len(block.Text)
+			}
+			if block.Type == "tool_use" {
+				summary.ToolUseNames = append(summary.ToolUseNames, block.ToolName)
+			}
+		}
+	}
+	return summary
+}
+
+func coreResponseResult(resp *format.CoreResponse) string {
+	types := coreResponseOutputTypes(resp)
+	if len(types) == 0 {
+		return "empty"
+	}
+	hasMessage := false
+	hasFunctionCall := false
+	hasReasoning := false
+	for _, typ := range types {
+		switch typ {
+		case "message":
+			hasMessage = true
+		case "function_call":
+			hasFunctionCall = true
+		case "reasoning":
+			hasReasoning = true
+		}
+	}
+	switch {
+	case hasFunctionCall:
+		return "function_call"
+	case hasMessage:
+		return "message"
+	case hasReasoning:
+		return "reasoning_only"
+	default:
+		return "empty"
+	}
+}
+
+func coreResponseOutputTypes(resp *format.CoreResponse) []string {
+	if resp == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 3)
+	add := func(typ string) {
+		if typ == "" {
+			return
+		}
+		if _, ok := seen[typ]; ok {
+			return
+		}
+		seen[typ] = struct{}{}
+		out = append(out, typ)
+	}
+	for _, msg := range resp.Messages {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, block := range msg.Content {
+			switch block.Type {
+			case "text", "image":
+				add("message")
+			case "tool_use":
+				add("function_call")
+			case "reasoning":
+				add("reasoning")
+			}
+		}
+	}
+	return out
 }
 
 // coreAnalysisRequestFromToolUse parses a tool_use CoreContentBlock into an

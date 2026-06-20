@@ -120,6 +120,52 @@ func TestTracerWritesNumberedCategoryUnderSession(t *testing.T) {
 	}
 }
 
+func TestTracerWritesVisualFallbackCategoryWithoutChangingResponsePath(t *testing.T) {
+	root := t.TempDir()
+	tracer := trace.New(trace.Config{Enabled: true, Root: filepath.Join(root, "Transform"), SessionID: "session-test"})
+
+	requestNumber := tracer.NextRequestNumber()
+	responsePath, err := tracer.WriteNumbered("Response", requestNumber, trace.Record{
+		Model:         "gpt-test",
+		OpenAIRequest: map[string]any{"input": "hello"},
+	})
+	if err != nil {
+		t.Fatalf("WriteNumbered(Response) error = %v", err)
+	}
+	fallbackPath, err := tracer.WriteVisualFallback(requestNumber, trace.VisualFallbackTrace{
+		Model: "gpt-test",
+		Fallback: trace.VisualFallbackInfo{
+			Type:       "visual_stream_fallback",
+			Trigger:    "stream_request_with_images",
+			ImageCount: 1,
+		},
+		Events: []trace.VisualFallbackEvent{{
+			Stage: "triggered",
+			Data:  map[string]any{"image_count": 1},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("WriteVisualFallback() error = %v", err)
+	}
+
+	if responsePath != filepath.Join(root, "Transform", "session-test", "gpt-test", "Response", "1.json") {
+		t.Fatalf("response path = %q, want %q", responsePath, filepath.Join(root, "Transform", "session-test", "gpt-test", "Response", "1.json"))
+	}
+	if fallbackPath != filepath.Join(root, "Transform", "session-test", "gpt-test", "VisualFallback", "1.json") {
+		t.Fatalf("fallback path = %q, want %q", fallbackPath, filepath.Join(root, "Transform", "session-test", "gpt-test", "VisualFallback", "1.json"))
+	}
+	data, err := os.ReadFile(fallbackPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{`"type": "visual_stream_fallback"`, `"stage": "triggered"`, `"session_id": "session-test"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("visual fallback trace missing %q: %s", want, content)
+		}
+	}
+}
+
 func TestSanitizePathSegmentPreservesSimpleNames(t *testing.T) {
 	if got := trace.SanitizePathSegment("gpt-test"); got != "gpt-test" {
 		t.Fatalf("SanitizePathSegment(gpt-test) = %q, want %q", got, "gpt-test")

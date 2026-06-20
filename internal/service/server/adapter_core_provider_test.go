@@ -12,7 +12,7 @@ import (
 	"moonbridge/internal/session"
 )
 
-func TestCoreResponseToStreamEventsEmitsTextAndUsage(t *testing.T) {
+func TestCoreResponseToCoreStreamEmitsTextAndUsage(t *testing.T) {
 	resp := &format.CoreResponse{
 		ID:     "msg_1",
 		Status: "completed",
@@ -27,7 +27,7 @@ func TestCoreResponseToStreamEventsEmitsTextAndUsage(t *testing.T) {
 		Usage: format.CoreUsage{InputTokens: 11, OutputTokens: 7, CachedInputTokens: 3},
 	}
 
-	events := collectCoreStreamEvents(coreResponseToStreamEvents(context.Background(), resp))
+	events := collectCoreStreamEvents(coreResponseToCoreStream(context.Background(), resp))
 	if len(events) == 0 {
 		t.Fatal("no stream events emitted")
 	}
@@ -53,6 +53,33 @@ func TestCoreResponseToStreamEventsEmitsTextAndUsage(t *testing.T) {
 	}
 	if completed.Usage.InputTokens != 11 || completed.Usage.OutputTokens != 7 || completed.Usage.CachedInputTokens != 3 {
 		t.Fatalf("completed usage = %+v", completed.Usage)
+	}
+}
+
+func TestCoreResponseToCoreStreamPreservesToolUse(t *testing.T) {
+	resp := &format.CoreResponse{
+		ID:     "msg_1",
+		Status: "completed",
+		Model:  "deepseek-v4-pro",
+		Messages: []format.CoreMessage{{
+			Role: "assistant",
+			Content: []format.CoreContentBlock{
+				{Type: "text", Text: "fixing layout"},
+				{Type: "tool_use", ToolUseID: "toolu_1", ToolName: "mcp__pencil___batch_design", ToolInput: json.RawMessage(`{"input":"{}"}`)},
+			},
+		}},
+		StopReason: "tool_use",
+	}
+
+	events := collectCoreStreamEvents(coreResponseToCoreStream(context.Background(), resp))
+	var sawToolStarted bool
+	for _, ev := range events {
+		if ev.Type == format.CoreContentBlockStarted && ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
+			sawToolStarted = true
+		}
+	}
+	if !sawToolStarted {
+		t.Fatalf("tool_use block not emitted: %+v", events)
 	}
 }
 

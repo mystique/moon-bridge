@@ -53,6 +53,31 @@ type Record struct {
 	Error                 any         `json:"error,omitempty"`
 }
 
+type VisualFallbackTrace struct {
+	SessionID     string                `json:"session_id,omitempty"`
+	RequestNumber uint64                `json:"request_number"`
+	CapturedAt    string                `json:"captured_at"`
+	Model         string                `json:"model,omitempty"`
+	Fallback      VisualFallbackInfo    `json:"fallback"`
+	Events        []VisualFallbackEvent `json:"events,omitempty"`
+	Warnings      []string              `json:"warnings,omitempty"`
+}
+
+type VisualFallbackInfo struct {
+	Type           string `json:"type"`
+	Trigger        string `json:"trigger"`
+	ImageCount     int    `json:"image_count,omitempty"`
+	VisualProvider string `json:"visual_provider,omitempty"`
+	VisualModel    string `json:"visual_model,omitempty"`
+	MaxRounds      int    `json:"max_rounds,omitempty"`
+}
+
+type VisualFallbackEvent struct {
+	Stage string         `json:"stage"`
+	Round int            `json:"round,omitempty"`
+	Data  map[string]any `json:"data,omitempty"`
+}
+
 type HTTPRequest struct {
 	Method     string      `json:"method"`
 	RequestURI string      `json:"request_uri"`
@@ -149,6 +174,48 @@ func (tracer *Tracer) WriteNumbered(category string, requestNumber uint64, recor
 		return "", err
 	}
 	slog.Debug("跟踪已写入", "path", path, "category", category, "request_number", requestNumber)
+	return path, nil
+}
+
+func (tracer *Tracer) WriteVisualFallback(requestNumber uint64, record VisualFallbackTrace) (string, error) {
+	if !tracer.Enabled() {
+		return "", nil
+	}
+
+	if !tracer.flat {
+		record.SessionID = tracer.sessionID
+	}
+	if requestNumber == 0 {
+		requestNumber = tracer.NextRequestNumber()
+	}
+	record.RequestNumber = requestNumber
+	if record.CapturedAt == "" {
+		record.CapturedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+
+	redacted, err := redactForJSON(record)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.MarshalIndent(redacted, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+
+	traceDir := tracer.Directory()
+	if !tracer.flat && record.Model != "" {
+		traceDir = filepath.Join(traceDir, SanitizePathSegment(record.Model))
+	}
+	traceDir = filepath.Join(traceDir, "VisualFallback")
+	if err := os.MkdirAll(traceDir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(traceDir, fmt.Sprintf("%d.json", record.RequestNumber))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	slog.Debug("跟踪已写入", "path", path, "category", "VisualFallback", "request_number", requestNumber)
 	return path, nil
 }
 

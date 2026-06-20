@@ -170,6 +170,10 @@ func (f CoreProviderFunc) CreateCore(ctx context.Context, req *format.CoreReques
 // NewCoreBridge creates a CoreOrchestrator from a CoreProvider upstream and a
 // CoreProvider visual model. It's the Core-level equivalent of WrapProvider.
 func NewCoreBridge(upstream CoreProvider, visualProvider CoreProvider, model string, maxRounds int, maxTokens int) *CoreOrchestrator {
+	return NewCoreBridgeWithObserver(upstream, visualProvider, model, maxRounds, maxTokens, nil)
+}
+
+func NewCoreBridgeWithObserver(upstream CoreProvider, visualProvider CoreProvider, model string, maxRounds int, maxTokens int, observer CoreTraceObserver) *CoreOrchestrator {
 	visionClient := NewBridgeCoreClient(BridgeCoreConfig{
 		Provider:  visualProvider,
 		Model:     model,
@@ -179,5 +183,6 @@ func NewCoreBridge(upstream CoreProvider, visualProvider CoreProvider, model str
 		Upstream:  upstream,
 		Client:    visionClient,
 		MaxRounds: maxRounds,
+		Observer:  observer,
 	})
 }

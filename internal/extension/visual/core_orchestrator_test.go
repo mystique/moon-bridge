@@ -1013,3 +1013,89 @@ func TestCoreOrchestratorPreservesFinalizedAssistantHistoryAcrossRounds(t *testi
 		t.Fatalf("assistant tool_use misplaced after finalized reasoning: %+v", assistantMsg.Content)
 	}
 }
+
+func TestCoreOrchestratorObserverRecordsVisualFallbackStages(t *testing.T) {
+	upstream := &fakeCoreUpstream{
+		responses: []*format.CoreResponse{
+			{
+				ID: "turn1", Status: "completed", StopReason: "tool_use",
+				Messages: []format.CoreMessage{{
+					Role: "assistant",
+					Content: []format.CoreContentBlock{{
+						Type: "tool_use", ToolUseID: "toolu_1", ToolName: ToolVisualBrief,
+						ToolInput: json.RawMessage(`{"image_refs":["Image #1"],"context":"describe"}`),
+					}},
+				}},
+			},
+			{
+				ID: "turn2", Status: "completed", StopReason: "end_turn",
+				Messages: []format.CoreMessage{{
+					Role:    "assistant",
+					Content: []format.CoreContentBlock{{Type: "text", Text: "done"}},
+				}},
+			},
+		},
+	}
+	vision := &fakeCoreVisionClient{text: "visual analysis result"}
+	observer := &recordingCoreObserver{}
+	orchestrator := NewCoreOrchestrator(CoreOrchestratorConfig{
+		Upstream:  upstream,
+		Client:    vision,
+		MaxRounds: 5,
+		Observer:  observer,
+	})
+
+	_, err := orchestrator.CreateCore(context.Background(), &format.CoreRequest{
+		Model: "test-model",
+		Messages: []format.CoreMessage{{
+			Role: "user",
+			Content: []format.CoreContentBlock{
+				{Type: "text", Text: "look"},
+				{Type: "image", ImageData: "b64_image_1", MediaType: "image/png"},
+			},
+		}},
+		Tools: []format.CoreTool{{Name: ToolVisualBrief}},
+	})
+	if err != nil {
+		t.Fatalf("CreateCore() error = %v", err)
+	}
+
+	gotStages := observer.stages()
+	wantStages := []string{"prepare_core_request", "main_model_round", "visual_tool", "main_model_round", "completed"}
+	if len(gotStages) != len(wantStages) {
+		t.Fatalf("observer stages = %v, want %v", gotStages, wantStages)
+	}
+	for i, want := range wantStages {
+		if gotStages[i] != want {
+			t.Fatalf("observer stages = %v, want %v", gotStages, wantStages)
+		}
+	}
+	if observer.events[0].ImageCount != 1 {
+		t.Fatalf("prepare image count = %d, want 1", observer.events[0].ImageCount)
+	}
+	if observer.events[1].Round != 1 || observer.events[1].Response.StopReason != "tool_use" || len(observer.events[1].Response.ToolUseNames) != 1 {
+		t.Fatalf("first round event = %+v, want tool_use visual_brief", observer.events[1])
+	}
+	if observer.events[2].ToolName != ToolVisualBrief || observer.events[2].ImageCount != 1 || observer.events[2].ResultLength == 0 {
+		t.Fatalf("visual tool event = %+v, want visual_brief with image and result", observer.events[2])
+	}
+	if observer.events[4].Result != "message" {
+		t.Fatalf("completed result = %q, want message", observer.events[4].Result)
+	}
+}
+
+type recordingCoreObserver struct {
+	events []CoreTraceEvent
+}
+
+func (o *recordingCoreObserver) RecordVisualEvent(event CoreTraceEvent) {
+	o.events = append(o.events, event)
+}
+
+func (o *recordingCoreObserver) stages() []string {
+	stages := make([]string, 0, len(o.events))
+	for _, event := range o.events {
+		stages = append(stages, event.Stage)
+	}
+	return stages
+}

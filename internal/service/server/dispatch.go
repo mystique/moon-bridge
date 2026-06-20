@@ -199,7 +199,10 @@ func (server *Server) writeTrace(record mbtrace.Record) {
 	if server.tracer == nil || !server.tracer.Enabled() {
 		return
 	}
-	requestNumber := server.tracer.NextRequestNumber()
+	requestNumber := record.RequestNumber
+	if requestNumber == 0 {
+		requestNumber = server.tracer.NextRequestNumber()
+	}
 
 	// Chat 分类：openai-chat 协议的请求/响应
 	if shouldWriteChatTrace(record) {

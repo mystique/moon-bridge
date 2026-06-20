@@ -6,6 +6,7 @@ import (
 
 	deepseekv4 "moonbridge/internal/extension/deepseek_v4"
 	"moonbridge/internal/extension/plugin"
+	visualpkg "moonbridge/internal/extension/visual"
 	"moonbridge/internal/format"
 	"moonbridge/internal/protocol/anthropic"
 	openai "moonbridge/internal/protocol/openai"
@@ -75,6 +76,27 @@ func TestComputeCostWithProviderPricingNilStats(t *testing.T) {
 	cost := computeCostWithProviderPricing(nil, nil, "model", "model", "provider", stats.BillingUsage{})
 	if cost != 0 {
 		t.Fatalf("nil stats should return 0, got %f", cost)
+	}
+}
+
+func TestVisualFallbackTraceRecorderWarnsOnReasoningOnlyOutput(t *testing.T) {
+	recorder := &visualFallbackTraceRecorder{}
+
+	recorder.RecordVisualEvent(visualpkg.CoreTraceEvent{
+		Stage:       "completed",
+		Result:      "reasoning_only",
+		OutputTypes: []string{"reasoning"},
+	})
+	recorder.finish(&openai.Response{
+		Status: "completed",
+		Output: []openai.OutputItem{{Type: "reasoning"}},
+	}, nil)
+
+	if len(recorder.record.Warnings) != 2 {
+		t.Fatalf("warnings = %v, want completed and OpenAI reasoning-only warnings", recorder.record.Warnings)
+	}
+	if got := recorder.record.Events[len(recorder.record.Events)-1].Stage; got != "openai_response" {
+		t.Fatalf("last event stage = %q, want openai_response", got)
 	}
 }
 

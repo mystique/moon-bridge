@@ -288,7 +288,7 @@ func (s *Server) handleWithAdapters(
 
 		// Wrap with visual orchestrator at Core level if enabled for this model.
 		// This uses CoreProvider, which is protocol-agnostic.
-		if visProv := s.wrapWithVisual(ctx, openAIReq.Model, preferred, providerAdapter, finalizeAnthropicUpstream); visProv != nil {
+		if visProv := s.wrapWithVisual(ctx, openAIReq.Model, preferred, providerAdapter, finalizeAnthropicUpstream, nil); visProv != nil {
 			var coreRespApi *format.CoreResponse
 			coreRespApi, err = visProv.CreateCore(ctx, coreReq)
 			if err == nil {
@@ -407,7 +407,7 @@ func (s *Server) handleWithAdapters(
 		// the chat-protocol endpoint instead.
 		visualCandidate := preferred
 		visualCandidate.Client = &chatProviderClient{c: chatClient}
-		if visProv := s.wrapWithVisual(ctx, openAIReq.Model, visualCandidate, providerAdapter, finalizeChatUpstream); visProv != nil {
+		if visProv := s.wrapWithVisual(ctx, openAIReq.Model, visualCandidate, providerAdapter, finalizeChatUpstream, nil); visProv != nil {
 			coreResp, err = visProv.CreateCore(ctx, coreReq)
 			if err != nil {
 				log.Error("adapter path: chat visual CreateCore failed", "error", err)
@@ -536,7 +536,7 @@ func (s *Server) handleWithAdapters(
 		// Wrap with visual orchestrator if enabled for this model.
 		googlePreferred := preferred
 		googlePreferred.Client = &googleProviderClient{c: googleClient, model: googlePreferred.UpstreamModel}
-		if visProv := s.wrapWithVisual(ctx, openAIReq.Model, googlePreferred, providerAdapter, nil); visProv != nil {
+		if visProv := s.wrapWithVisual(ctx, openAIReq.Model, googlePreferred, providerAdapter, nil, nil); visProv != nil {
 			var visErr error
 			coreResp, visErr = visProv.CreateCore(ctx, coreReq)
 			if visErr != nil {
@@ -897,7 +897,17 @@ func (s *Server) handleAdapterStream(
 		OpenAIRequest: mbtrace.RawJSONOrString(bodyBytes),
 		Model:         openAIReq.Model,
 	}
+	var visualTrace *visualFallbackTraceRecorder
 	defer func() {
+		if visualTrace != nil && s.tracer != nil && s.tracer.Enabled() {
+			if streamRecord.RequestNumber == 0 {
+				streamRecord.RequestNumber = s.tracer.NextRequestNumber()
+			}
+			visualTrace.finish(streamRecord.OpenAIResponse, streamRecord.Error)
+			if _, err := s.tracer.WriteVisualFallback(streamRecord.RequestNumber, visualTrace.record); err != nil && s.traceErrors != nil {
+				fmt.Fprintf(s.traceErrors, "跟踪 VisualFallback 写入失败: %v\n", err)
+			}
+		}
 		s.writeTrace(streamRecord)
 	}()
 
@@ -916,7 +926,9 @@ func (s *Server) handleAdapterStream(
 				}
 				return &msgReq, nil
 			}
-			if visProv := s.wrapWithVisual(ctx, openAIReq.Model, candidate, providerAdapter, finalizeAnthropicUpstream); visProv != nil {
+			recorder := s.newVisualFallbackTraceRecorder(openAIReq.Model, "stream_request_with_images", coreRequestImageCount(coreReq))
+			if visProv := s.wrapWithVisual(ctx, openAIReq.Model, candidate, providerAdapter, finalizeAnthropicUpstream, recorder); visProv != nil {
+				visualTrace = recorder
 				coreResp, err := visProv.CreateCore(ctx, coreReq)
 				if err != nil {
 					log.Error("adapter stream visual fallback: CreateCore failed", "error", err)
@@ -998,7 +1010,7 @@ func (s *Server) handleAdapterStream(
 					}
 					return &msgReq, nil
 				}
-				if visProv := s.wrapWithVisual(ctx, openAIReq.Model, candidate, provAdapter, finalizeAnthropicUpstream); visProv != nil {
+				if visProv := s.wrapWithVisual(ctx, openAIReq.Model, candidate, provAdapter, finalizeAnthropicUpstream, nil); visProv != nil {
 					visCoreProvider = visProv
 				}
 			}
@@ -1197,7 +1209,7 @@ func (s *Server) handleAdapterStream(
 				}
 				visCandidate := candidate
 				visCandidate.Client = &chatProviderClient{c: chatClient}
-				if visProv := s.wrapWithVisual(ctx, openAIReq.Model, visCandidate, providerAdapter, finalizeUpstream); visProv != nil {
+				if visProv := s.wrapWithVisual(ctx, openAIReq.Model, visCandidate, providerAdapter, finalizeUpstream, nil); visProv != nil {
 					coreResp, visErr := visProv.CreateCore(ctx, coreReq)
 					if visErr != nil {
 						log.Error("adapter stream: chat visual CreateCore failed", "error", visErr)
@@ -1334,7 +1346,7 @@ func (s *Server) handleAdapterStream(
 			if visOk && visCfg.Provider != "" && visCfg.Model != "" {
 				visCandidate := candidate
 				visCandidate.Client = &googleProviderClient{c: googleClient, model: candidate.UpstreamModel}
-				if visProv := s.wrapWithVisual(ctx, openAIReq.Model, visCandidate, providerAdapter, nil); visProv != nil {
+				if visProv := s.wrapWithVisual(ctx, openAIReq.Model, visCandidate, providerAdapter, nil, nil); visProv != nil {
 					coreResp, visErr := visProv.CreateCore(ctx, coreReq)
 					if visErr != nil {
 						log.Error("adapter stream: google visual CreateCore failed", "error", visErr)
@@ -1803,7 +1815,7 @@ func (s *Server) writeCoreResponseAsOpenAIStream(
 		return
 	}
 
-	streamChanAny, err := clientStream.FromCoreStream(ctx, coreReq, coreResponseToStreamEvents(ctx, coreResp))
+	streamChanAny, err := clientStream.FromCoreStream(ctx, coreReq, coreResponseToCoreStream(ctx, coreResp))
 	if err != nil {
 		payload := openai.ErrorResponse{
 			Error: openai.ErrorObject{
@@ -1882,93 +1894,6 @@ func (s *Server) writeCoreResponseAsOpenAIStream(
 	}
 }
 
-func coreResponseToStreamEvents(ctx context.Context, resp *format.CoreResponse) <-chan format.CoreStreamEvent {
-	out := make(chan format.CoreStreamEvent, 16)
-	go func() {
-		defer close(out)
-
-		send := func(ev format.CoreStreamEvent) bool {
-			select {
-			case <-ctx.Done():
-				return false
-			case out <- ev:
-				return true
-			}
-		}
-
-		if resp == nil {
-			send(format.CoreStreamEvent{
-				Type: format.CoreEventFailed,
-				Error: &format.CoreError{
-					Message: "core response is nil",
-					Type:    "server_error",
-				},
-			})
-			return
-		}
-		if !send(format.CoreStreamEvent{Type: format.CoreEventCreated, ItemID: resp.ID, Model: resp.Model}) {
-			return
-		}
-		index := 0
-		for _, msg := range resp.Messages {
-			if msg.Role != "assistant" {
-				continue
-			}
-			for _, block := range msg.Content {
-				switch block.Type {
-				case "reasoning":
-					if !send(format.CoreStreamEvent{Type: format.CoreContentBlockStarted, Index: index, ContentBlock: &format.CoreContentBlock{Type: "reasoning"}}) {
-						return
-					}
-					if block.ReasoningText != "" {
-						if !send(format.CoreStreamEvent{Type: format.CoreTextDelta, Index: index, Delta: block.ReasoningText}) {
-							return
-						}
-					}
-					if !send(format.CoreStreamEvent{Type: format.CoreContentBlockDone, Index: index, ContentBlock: &format.CoreContentBlock{
-						Type:               "reasoning",
-						ReasoningSignature: block.ReasoningSignature,
-					}}) {
-						return
-					}
-					index++
-				case "text":
-					if !send(format.CoreStreamEvent{Type: format.CoreContentBlockStarted, Index: index, ContentBlock: &format.CoreContentBlock{Type: "text"}}) {
-						return
-					}
-					if block.Text != "" {
-						if !send(format.CoreStreamEvent{Type: format.CoreTextDelta, Index: index, Delta: block.Text}) {
-							return
-						}
-					}
-					if !send(format.CoreStreamEvent{Type: format.CoreContentBlockDone, Index: index}) {
-						return
-					}
-					index++
-				}
-			}
-		}
-		status := "completed"
-		if resp.Status != "" {
-			status = resp.Status
-		}
-		eventType := format.CoreEventCompleted
-		if status == "failed" {
-			eventType = format.CoreEventFailed
-		} else if status == "incomplete" {
-			eventType = format.CoreEventIncomplete
-		}
-		send(format.CoreStreamEvent{
-			Type:   eventType,
-			Status: status,
-			Model:  resp.Model,
-			Usage:  &resp.Usage,
-			Error:  resp.Error,
-		})
-	}()
-	return out
-}
-
 func coreRequestHasImage(req *format.CoreRequest) bool {
 	if req == nil {
 		return false
@@ -1988,6 +1913,33 @@ func coreRequestHasImage(req *format.CoreRequest) bool {
 	return false
 }
 
+func coreRequestImageCount(req *format.CoreRequest) int {
+	if req == nil {
+		return 0
+	}
+	count := 0
+	for _, block := range req.System {
+		count += coreBlockImageCount(block)
+	}
+	for _, msg := range req.Messages {
+		for _, block := range msg.Content {
+			count += coreBlockImageCount(block)
+		}
+	}
+	return count
+}
+
+func coreBlockImageCount(block format.CoreContentBlock) int {
+	count := 0
+	if block.Type == "image" {
+		count++
+	}
+	for _, child := range block.ToolResultContent {
+		count += coreBlockImageCount(child)
+	}
+	return count
+}
+
 func coreBlockHasImage(block format.CoreContentBlock) bool {
 	if block.Type == "image" {
 		return true
@@ -2001,6 +1953,129 @@ func coreBlockHasImage(block format.CoreContentBlock) bool {
 		}
 	}
 	return false
+}
+
+type visualFallbackTraceRecorder struct {
+	record mbtrace.VisualFallbackTrace
+}
+
+func (s *Server) newVisualFallbackTraceRecorder(model string, trigger string, imageCount int) *visualFallbackTraceRecorder {
+	if s.tracer == nil || !s.tracer.Enabled() {
+		return nil
+	}
+	info := mbtrace.VisualFallbackInfo{
+		Type:       "visual_stream_fallback",
+		Trigger:    trigger,
+		ImageCount: imageCount,
+	}
+	if s.runtime != nil {
+		cfg := s.runtime.Current().Config
+		if visCfg, ok := visualpkg.ConfigForModelFromResolvedConfig(cfg, model); ok {
+			info.VisualProvider = visCfg.Provider
+			info.VisualModel = visCfg.Model
+			info.MaxRounds = visCfg.MaxRounds
+		}
+	}
+	recorder := &visualFallbackTraceRecorder{
+		record: mbtrace.VisualFallbackTrace{
+			Model:    model,
+			Fallback: info,
+			Events: []mbtrace.VisualFallbackEvent{{
+				Stage: "triggered",
+				Data: map[string]any{
+					"image_count": imageCount,
+					"trigger":     trigger,
+				},
+			}},
+		},
+	}
+	return recorder
+}
+
+func (r *visualFallbackTraceRecorder) RecordVisualEvent(event visualpkg.CoreTraceEvent) {
+	if r == nil {
+		return
+	}
+	data := map[string]any{}
+	if event.ImageCount > 0 {
+		data["image_count"] = event.ImageCount
+	}
+	if len(event.Images) > 0 {
+		data["images"] = event.Images
+	}
+	if event.Request.MessageCount > 0 || event.Request.ToolCount > 0 || event.Request.HasImageBlocks {
+		data["request_summary"] = event.Request
+	}
+	if event.Response.StopReason != "" || event.Response.Status != "" || len(event.Response.ContentTypes) > 0 {
+		data["response_summary"] = event.Response
+	}
+	if event.ToolName != "" {
+		data["tool_name"] = event.ToolName
+	}
+	if event.ToolUseID != "" {
+		data["tool_use_id"] = event.ToolUseID
+	}
+	if event.PromptLength > 0 {
+		data["prompt_length"] = event.PromptLength
+	}
+	if event.ResultLength > 0 {
+		data["result_length"] = event.ResultLength
+	}
+	if event.Result != "" {
+		data["result"] = event.Result
+	}
+	if len(event.OutputTypes) > 0 {
+		data["output_types"] = event.OutputTypes
+	}
+	r.record.Events = append(r.record.Events, mbtrace.VisualFallbackEvent{
+		Stage: event.Stage,
+		Round: event.Round,
+		Data:  data,
+	})
+	if event.Stage == "completed" && event.Result == "reasoning_only" {
+		r.record.Warnings = append(r.record.Warnings, "visual fallback completed with no message/function_call output")
+	}
+}
+
+func (r *visualFallbackTraceRecorder) finish(openAIResponse any, err any) {
+	if r == nil {
+		return
+	}
+	if err != nil {
+		r.record.Warnings = append(r.record.Warnings, "visual fallback returned an error response")
+		return
+	}
+	resp, ok := openAIResponse.(*openai.Response)
+	if !ok || resp == nil {
+		return
+	}
+	outputTypes := make([]string, 0, len(resp.Output))
+	hasMessage := false
+	hasFunctionCall := false
+	hasReasoning := false
+	for _, item := range resp.Output {
+		outputTypes = append(outputTypes, item.Type)
+		switch item.Type {
+		case "message":
+			hasMessage = true
+		case "function_call":
+			hasFunctionCall = true
+		case "reasoning":
+			hasReasoning = true
+		}
+	}
+	data := map[string]any{
+		"status":              resp.Status,
+		"openai_output_types": outputTypes,
+		"output_text_length":  len(resp.OutputText),
+	}
+	r.record.Events = append(r.record.Events, mbtrace.VisualFallbackEvent{
+		Stage: "openai_response",
+		Data:  data,
+	})
+	if hasReasoning && !hasMessage && !hasFunctionCall && len(resp.OutputText) == 0 {
+		r.record.Warnings = append(r.record.Warnings, "visual fallback OpenAI response contains only reasoning output")
+	}
 }
 
 // ============================================================================
@@ -2231,6 +2306,7 @@ func (s *Server) wrapWithVisual(
 	preferred provider.ProviderCandidate,
 	providerAdapter format.ProviderAdapter,
 	finalizeUpstream func(ctx context.Context, upstream any) (any, error),
+	observer visualpkg.CoreTraceObserver,
 ) visualpkg.CoreProvider {
 	pm := s.activeProviderManager()
 	if s.pluginRegistry == nil || s.runtime == nil || modelAlias == "" || pm == nil {
@@ -2302,7 +2378,7 @@ func (s *Server) wrapWithVisual(
 	}
 	visCP := newAdapterCoreProvider(visAdapter, visClient)
 
-	return visualpkg.NewCoreBridge(upstreamCP, visCP, visCfg.Model, visCfg.MaxRounds, visCfg.MaxTokens)
+	return visualpkg.NewCoreBridgeWithObserver(upstreamCP, visCP, visCfg.Model, visCfg.MaxRounds, visCfg.MaxTokens, observer)
 }
 
 // chatProviderClient adapts *chat.Client to provider.ProviderClient so the
