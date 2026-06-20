@@ -460,6 +460,7 @@ type streamConverterState struct {
 	finalUsage      *format.CoreUsage         // tracked from message_delta, passed to message_stop
 	adapter         *AnthropicProviderAdapter // for plugin hooks
 	suppressText    map[int]bool              // text indices to suppress (server-side search status, etc.)
+	textStrippers   map[int]*thinkTagStripper // per text index: strips stray <think>/</think> leaks
 	buf             *[]StreamEvent            // per-stream event buffer (local, not shared)
 	bufMu           *sync.Mutex               // guards buf
 	ctx             context.Context           // for context-aware channel sends
@@ -492,6 +493,7 @@ func (a *AnthropicProviderAdapter) ToCoreStream(ctx context.Context, src any) (*
 			blockSignatures: make(map[int]string),
 			adapter:         a,
 			suppressText:    make(map[int]bool),
+			textStrippers:   make(map[int]*thinkTagStripper),
 			buf:             &buf,
 			bufMu:           &bufMu,
 			ctx:             ctx,
@@ -663,10 +665,14 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 				s.suppressText[index] = true
 				break
 			}
+			text := s.stripThinkTags(index, ev.Delta.Text)
+			if text == "" {
+				break
+			}
 			s.emit(events, format.CoreStreamEvent{
 				Type:  format.CoreTextDelta,
 				Index: index,
-				Delta: ev.Delta.Text,
+				Delta: text,
 			})
 
 		case ev.Delta.Type == "input_json_delta" || blockType == "tool_use":
@@ -700,6 +706,19 @@ func (s *streamConverterState) convertEvent(events chan<- format.CoreStreamEvent
 		if s.suppressText[index] {
 			delete(s.suppressText, index)
 			break
+		}
+
+		// Drain any text held back by the think-tag stripper (e.g. a partial
+		// tag resolved at end of block) before finalizing the text block.
+		if stripper, ok := s.textStrippers[index]; ok {
+			if tail := stripper.Flush(); tail != "" {
+				s.emit(events, format.CoreStreamEvent{
+					Type:  format.CoreTextDelta,
+					Index: index,
+					Delta: tail,
+				})
+			}
+			delete(s.textStrippers, index)
 		}
 
 		if blockType == "thinking" {
@@ -948,9 +967,10 @@ func (a *AnthropicProviderAdapter) fromContentBlocks(blocks []ContentBlock) []fo
 func (a *AnthropicProviderAdapter) fromContentBlock(b ContentBlock) format.CoreContentBlock {
 	switch b.Type {
 	case "text":
+		var stripper thinkTagStripper
 		return format.CoreContentBlock{
 			Type: "text",
-			Text: b.Text,
+			Text: stripper.Feed(b.Text) + stripper.Flush(),
 		}
 
 	case "image":
