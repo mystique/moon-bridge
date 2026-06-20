@@ -218,7 +218,12 @@ func (s *Server) handleWithAdapters(
 		}
 
 		// Prepend cached reasoning blocks for DeepSeek thinking chain replay.
-		if s.pluginRegistry != nil && sess != nil {
+		// Gate on deepseek_v4 being enabled for this model: models that don't
+		// use the extension (and therefore never cache thinking) must not get
+		// empty thinking blocks injected — doing so pollutes the upstream
+		// context and degrades non-DeepSeek models (e.g. qwen) into ending
+		// turns without acting.
+		if deepseekV4Enabled(s.pluginRegistry, openAIReq.Model) && sess != nil {
 			prependCachedThinking(upstreamReq, sess)
 		}
 
@@ -230,7 +235,7 @@ func (s *Server) handleWithAdapters(
 			if wsMode == "enabled" {
 				injectAnthropicWebSearch(&msgReq)
 			}
-			if s.pluginRegistry != nil && sess != nil {
+			if deepseekV4Enabled(s.pluginRegistry, openAIReq.Model) && sess != nil {
 				prependCachedThinking(&msgReq, sess)
 			}
 			return &msgReq, nil
@@ -896,7 +901,7 @@ func (s *Server) handleAdapterStream(
 				if wsMode == "enabled" {
 					injectAnthropicWebSearch(&msgReq)
 				}
-				if s.pluginRegistry != nil && sess != nil {
+				if deepseekV4Enabled(s.pluginRegistry, openAIReq.Model) && sess != nil {
 					prependCachedThinking(&msgReq, sess)
 				}
 				return &msgReq, nil
@@ -978,7 +983,7 @@ func (s *Server) handleAdapterStream(
 					if wsMode == "enabled" {
 						injectAnthropicWebSearch(&msgReq)
 					}
-					if s.pluginRegistry != nil && sess != nil {
+					if deepseekV4Enabled(s.pluginRegistry, openAIReq.Model) && sess != nil {
 						prependCachedThinking(&msgReq, sess)
 					}
 					return &msgReq, nil
@@ -2554,6 +2559,21 @@ func injectAnthropicWebSearch(req *anthropic.MessageRequest) {
 		Type:    "web_search_20250305",
 		MaxUses: maxUses,
 	})
+}
+
+// deepseekV4Enabled returns true when the deepseek_v4 plugin is registered
+// and enabled for the given model alias. The thinking-chain replay helpers
+// (prependCachedThinking) must be gated by this, otherwise models that do not
+// use the extension keep receiving empty thinking blocks on tool-use turns.
+func deepseekV4Enabled(reg *plugin.Registry, model string) bool {
+	if reg == nil || model == "" {
+		return false
+	}
+	p := reg.Plugin(deepseekv4.PluginName)
+	if p == nil {
+		return false
+	}
+	return p.EnabledForModel(model)
 }
 
 // prependCachedThinking restores thinking blocks before assistant messages

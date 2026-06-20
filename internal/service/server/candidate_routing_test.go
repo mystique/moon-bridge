@@ -350,3 +350,46 @@ func TestRememberStreamResponseContentCachesDeepSeekThinkingForLaterReplay(t *te
 		t.Fatalf("prepended stream-response thinking block mismatch, got %+v", head)
 	}
 }
+
+func TestDeepSeekV4Enabled(t *testing.T) {
+	// Regression for the qwen3.7-plus auto-stop issue: the four dispatch
+	// call sites that prepend cached thinking must gate on this helper.
+	// When it returns false (deepseek_v4 disabled for the model), they must
+	// not call prependCachedThinking, so no empty thinking block is injected
+	// into the upstream context.
+
+	// Enabled via isEnabled func.
+	regEnabled := plugin.NewRegistry(nil)
+	regEnabled.Register(deepseekv4.NewPlugin(func(string) bool { return true }))
+	if err := regEnabled.InitAll(nil); err != nil {
+		t.Fatalf("InitAll error = %v", err)
+	}
+	if !deepseekV4Enabled(regEnabled, "any-model") {
+		t.Fatal("deepseekV4Enabled = false, want true")
+	}
+
+	// Disabled via isEnabled func (models like qwen3.7-plus without deepseek_v4).
+	regDisabled := plugin.NewRegistry(nil)
+	regDisabled.Register(deepseekv4.NewPlugin(func(string) bool { return false }))
+	if err := regDisabled.InitAll(nil); err != nil {
+		t.Fatalf("InitAll error = %v", err)
+	}
+	if deepseekV4Enabled(regDisabled, "any-model") {
+		t.Fatal("deepseekV4Enabled = true, want false")
+	}
+
+	// Plugin not registered.
+	if deepseekV4Enabled(plugin.NewRegistry(nil), "any-model") {
+		t.Fatal("deepseekV4Enabled with no plugin = true, want false")
+	}
+
+	// Nil registry.
+	if deepseekV4Enabled(nil, "any-model") {
+		t.Fatal("deepseekV4Enabled with nil registry = true, want false")
+	}
+
+	// Empty model.
+	if deepseekV4Enabled(regEnabled, "") {
+		t.Fatal("deepseekV4Enabled with empty model = true, want false")
+	}
+}
