@@ -313,9 +313,15 @@ func (a *AnthropicProviderAdapter) FromCoreRequest(ctx context.Context, req *for
 			isToolResultOnly(anthropicReq.Messages[last].Content) {
 			anthropicReq.Messages[last].Content = append(
 				anthropicReq.Messages[last].Content, anthroMsg.Content...)
-		} else {
-			anthropicReq.Messages = append(anthropicReq.Messages, anthroMsg)
+			continue
 		}
+		if last >= 0 && anthroMsg.Role == "assistant" &&
+			anthropicReq.Messages[last].Role == "assistant" {
+			anthropicReq.Messages[last].Content = append(
+				anthropicReq.Messages[last].Content, anthroMsg.Content...)
+			continue
+		}
+		anthropicReq.Messages = append(anthropicReq.Messages, anthroMsg)
 	}
 
 	// Ensure first message has role "user" — Anthropic API rejects requests

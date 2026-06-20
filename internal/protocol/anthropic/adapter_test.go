@@ -725,3 +725,125 @@ func TestFromCoreRequest_MergesConsecutiveToolResultMessages(t *testing.T) {
 		}
 	}
 }
+
+func TestFromCoreRequest_MergesConsecutiveAssistantMessages(t *testing.T) {
+	adapter := newTestAdapter()
+
+	req := &format.CoreRequest{
+		Model: "claude-sonnet-4",
+		Messages: []format.CoreMessage{
+			{
+				Role:    "user",
+				Content: []format.CoreContentBlock{{Type: "text", Text: "check this"}},
+			},
+			{
+				Role:    "assistant",
+				Content: []format.CoreContentBlock{{Type: "text", Text: "I'll inspect it."}},
+			},
+			{
+				Role: "assistant",
+				Content: []format.CoreContentBlock{
+					{
+						Type:      "tool_use",
+						ToolUseID: "call_1",
+						ToolName:  "inspect",
+						ToolInput: json.RawMessage(`{"target":"file"}`),
+					},
+				},
+			},
+			{
+				Role: "tool",
+				Content: []format.CoreContentBlock{
+					{
+						Type:      "tool_result",
+						ToolUseID: "call_1",
+						ToolResultContent: []format.CoreContentBlock{
+							{Type: "text", Text: "done"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := adapter.FromCoreRequest(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgReq := result.(*anthropic.MessageRequest)
+	if len(msgReq.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgReq.Messages))
+	}
+	if msgReq.Messages[1].Role != "assistant" {
+		t.Fatalf("messages[1].Role = %q, want assistant", msgReq.Messages[1].Role)
+	}
+	blocks := msgReq.Messages[1].Content
+	if len(blocks) != 2 {
+		t.Fatalf("merged assistant message has %d blocks, want 2", len(blocks))
+	}
+	if blocks[0].Type != "text" || blocks[0].Text != "I'll inspect it." {
+		t.Fatalf("first assistant block = %#v, want text block", blocks[0])
+	}
+	if blocks[1].Type != "tool_use" || blocks[1].ID != "call_1" {
+		t.Fatalf("second assistant block = %#v, want tool_use call_1", blocks[1])
+	}
+}
+
+func TestFromCoreRequest_MergesMultipleConsecutiveAssistantMessages(t *testing.T) {
+	adapter := newTestAdapter()
+
+	req := &format.CoreRequest{
+		Model: "claude-sonnet-4",
+		Messages: []format.CoreMessage{
+			{
+				Role:    "user",
+				Content: []format.CoreContentBlock{{Type: "text", Text: "continue"}},
+			},
+			{
+				Role:    "assistant",
+				Content: []format.CoreContentBlock{{Type: "text", Text: "I'll continue."}},
+			},
+			{
+				Role: "assistant",
+				Content: []format.CoreContentBlock{
+					{
+						Type:          "reasoning",
+						ReasoningText: "Need the current layout before editing.",
+					},
+				},
+			},
+			{
+				Role: "assistant",
+				Content: []format.CoreContentBlock{
+					{
+						Type:      "tool_use",
+						ToolUseID: "call_2",
+						ToolName:  "get_editor_state",
+						ToolInput: json.RawMessage(`{"include_schema":true}`),
+					},
+				},
+			},
+		},
+	}
+
+	result, err := adapter.FromCoreRequest(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgReq := result.(*anthropic.MessageRequest)
+	if len(msgReq.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgReq.Messages))
+	}
+	blocks := msgReq.Messages[1].Content
+	if len(blocks) != 3 {
+		t.Fatalf("merged assistant message has %d blocks, want 3", len(blocks))
+	}
+	wantTypes := []string{"text", "thinking", "tool_use"}
+	for i, want := range wantTypes {
+		if blocks[i].Type != want {
+			t.Fatalf("blocks[%d].Type = %q, want %q", i, blocks[i].Type, want)
+		}
+	}
+}
