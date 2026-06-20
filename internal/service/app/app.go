@@ -42,11 +42,21 @@ func WelcomeMessage() string {
 	return "欢迎使用 " + Name + "!"
 }
 
+type RunServerOptions struct {
+	ConfigPath        string
+	ConfigLoadOptions config.LoadOptions
+	ConfigWatch       bool
+}
+
 func RunServer(ctx context.Context, cfg config.Config, errors io.Writer) error {
+	return RunServerWithOptions(ctx, cfg, errors, RunServerOptions{})
+}
+
+func RunServerWithOptions(ctx context.Context, cfg config.Config, errors io.Writer, opts RunServerOptions) error {
 	switch cfg.Mode {
 	case config.ModeTransform:
 		slog.Info("启动服务器", "mode", cfg.Mode, "addr", cfg.Addr)
-		return runTransform(ctx, cfg, errors)
+		return runTransform(ctx, cfg, errors, opts)
 	case config.ModeCaptureResponse:
 		slog.Info("启动服务器", "mode", cfg.Mode, "addr", cfg.Addr)
 		return runCaptureResponse(ctx, cfg, errors)
@@ -58,7 +68,7 @@ func RunServer(ctx context.Context, cfg config.Config, errors io.Writer) error {
 	}
 }
 
-func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) error {
+func runTransform(ctx context.Context, cfg config.Config, errors io.Writer, opts RunServerOptions) error {
 	var rt *runtime.Runtime
 
 	// Construct domain configs from global config.
@@ -198,6 +208,18 @@ func runTransform(ctx context.Context, cfg config.Config, errors io.Writer) erro
 
 	// === Phase 3: Build Runtime ===
 	rt = runtime.NewRuntime(cfg, providerMgr, pricing)
+	if opts.ConfigWatch && opts.ConfigPath != "" {
+		go func() {
+			if err := watchConfigFile(ctx, watchConfigFileOptions{
+				Path:        opts.ConfigPath,
+				LoadOptions: opts.ConfigLoadOptions,
+				Runtime:     rt,
+				Store:       cs,
+			}); err != nil {
+				slog.Warn("配置文件监听已停止", "path", opts.ConfigPath, "error", err)
+			}
+		}()
+	}
 
 	// === Phase 4: Build Server with Runtime ===
 	// Create shared cache registry (used by both Bridge and Adapter paths).

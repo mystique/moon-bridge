@@ -81,9 +81,11 @@ services:
     build: .
     ports: ["38440:38440"]
     volumes:
-      - ./config.yml:/config/config.yml
+      - ./config:/config:ro
       - ./data:/app/data
 ```
+
+将宿主机配置文件放在 `./config/config.yml`，并挂载整个 `./config` 目录。不要使用 `./config.yml:/config/config.yml` 这种单文件 bind mount；常见编辑器保存时会用临时文件 rename 替换原文件，容器内的单文件挂载可能因此变成 `no such file or directory`，配置热加载也就无法读取新内容。
 
 ## Cloudflare Workers WASM
 

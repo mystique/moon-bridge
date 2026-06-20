@@ -14,7 +14,10 @@ services:
     ports:
       - "127.0.0.1:38440:38440"
     volumes:
-      - ./config.yml:/config/config.yml:ro
+      # Mount the containing directory, not the file itself. Many editors save
+      # by renaming a temp file over config.yml; file-level bind mounts can then
+      # leave /config/config.yml missing inside the container.
+      - ./config:/config:ro
       - ./data:/app/data
       - ./logs:/app/logs
       - ./trace:/app/trace

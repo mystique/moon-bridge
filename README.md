@@ -70,8 +70,12 @@ claude --model your-alias --api-url http://127.0.0.1:38440 --api-key any-value
 
 ```bash
 docker build -t moonbridge .
-docker run -p 38440:38440 -v $(pwd)/config.yml:/config/config.yml moonbridge
+mkdir -p config
+cp config.example.yml config/config.yml
+docker run -p 38440:38440 -v $(pwd)/config:/config:ro moonbridge
 ```
+
+Docker 热加载配置时请挂载配置目录，而不是单独挂载 `config.yml` 文件；编辑器原子保存会替换宿主文件 inode，单文件 bind mount 可能导致容器内 `/config/config.yml` 消失。
 
 ## 命令行选项
 

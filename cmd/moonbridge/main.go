@@ -82,9 +82,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 
-	cfg, err = config.LoadFromFileWithOptions(resolvedConfigPath, config.LoadOptions{
+	loadOptions := config.LoadOptions{
 		ExtensionSpecs: extensions.ConfigSpecs(),
-	})
+	}
+	cfg, err = config.LoadFromFileWithOptions(resolvedConfigPath, loadOptions)
 	if err != nil {
 		writeStartupError(stderr, "配置文件加载失败", resolvedConfigPath, err,
 			"未传 -config 时默认读取 $HOME/moonbridge/config.yml。",
@@ -144,7 +145,11 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
-	if err := app.RunServer(ctx, cfg, stderr); err != nil {
+	if err := app.RunServerWithOptions(ctx, cfg, stderr, app.RunServerOptions{
+		ConfigPath:        resolvedConfigPath,
+		ConfigLoadOptions: loadOptions,
+		ConfigWatch:       true,
+	}); err != nil {
 		writeStartupError(stderr, "服务运行失败", resolvedConfigPath, err,
 			"检查监听地址是否被占用，以及上游 provider 配置是否可用。")
 		return exitRuntimeErr
