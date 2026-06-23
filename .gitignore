@@ -15,11 +15,10 @@ docs/superpowers/
 helloagents/
 AGENTS.md
 CLAUDE.md
-.codex/
 !.codex/
-.codex/*
+.codex/**
 !.codex/skills/
-.codex/skills/*
+.codex/skills/**
 !.codex/skills/moonbridge-webui-design/
 !.codex/skills/moonbridge-webui-design/**
 .claude
@@ -75,4 +74,7 @@ webui/playwright-report/
 /moonbridge
 /logs/
 logs/
+!/webui/src/features/logs/
 *.log
+.omx/
+omx_wiki/

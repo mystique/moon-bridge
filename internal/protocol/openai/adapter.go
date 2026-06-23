@@ -87,7 +87,7 @@ func (a *OpenAIAdapter) ToCoreRequest(ctx context.Context, req any) (*format.Cor
 	openaiReq.Input = preprocessed
 
 	// 2. Parse Input → Messages + System.
-	messages, system, err := convertInput(openaiReq.Input, openaiReq.Model, a.nsStrategy)
+	messages, system, err := convertInput(openaiReq.Input, openaiReq.Model, a.nsStrategy, hasNamespaceTools(openaiReq.Tools))
 	if err != nil {
 		return nil, fmt.Errorf("invalid input: %w", err)
 	}
@@ -1126,7 +1126,7 @@ type inputItem struct {
 //     from function_call items).
 //   - Items with tool-call output types → tool_result user messages.
 //   - Items with tool-call input types → tool_use within assistant messages.
-func convertInput(raw json.RawMessage, model string, nsStrategy codextool.NamespaceStrategy) ([]format.CoreMessage, []format.CoreContentBlock, error) {
+func convertInput(raw json.RawMessage, model string, nsStrategy codextool.NamespaceStrategy, encodeNamespacedHistory bool) ([]format.CoreMessage, []format.CoreContentBlock, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil, nil
 	}
@@ -1164,6 +1164,7 @@ func convertInput(raw json.RawMessage, model string, nsStrategy codextool.Namesp
 	system := make([]format.CoreContentBlock, 0)
 	var pendingReasoning []format.CoreContentBlock
 	var pendingFCBlocks []format.CoreContentBlock // batch consecutive function_calls
+	toolOutputIDs := toolOutputCallIDs(items)
 
 	for _, item := range items {
 		if isToolCallOutputType(item.Type) {
@@ -1260,19 +1261,22 @@ func convertInput(raw json.RawMessage, model string, nsStrategy codextool.Namesp
 			if !json.Valid([]byte(item.Arguments)) {
 				toolInput = json.RawMessage(`{}`)
 			}
+			toolUseID := firstNonEmpty(item.CallID, item.ID)
+			encodeHistory := encodeNamespacedHistory || toolOutputIDs[toolUseID]
 			// Historical namespaced calls (e.g. MCP tools) arrive with a
 			// namespace plus the bare sub-tool name. Reconstruct the upstream-
 			// facing tool_use so multi-turn history matches the registered
 			// tools (otherwise the upstream rejects with 400 on name mismatch).
 			toolName := item.Name
-			if item.Namespace != "" {
+			if encodeHistory && item.Namespace != "" {
 				toolName, toolInput = codextool.EncodeNamespacedHistoryCall(item.Namespace, item.Name, toolInput, nsStrategy)
 			}
 			pendingFCBlocks = append(pendingFCBlocks, format.CoreContentBlock{
-				Type:      "tool_use",
-				ToolUseID: firstNonEmpty(item.CallID, item.ID),
-				ToolName:  toolName,
-				ToolInput: toolInput,
+				Type:          "tool_use",
+				ToolUseID:     toolUseID,
+				ToolName:      toolName,
+				ToolNamespace: namespaceForHistory(item.Namespace, encodeHistory),
+				ToolInput:     toolInput,
 			})
 
 		case item.Type == "custom_tool_call" || item.Type == "local_shell_call":
@@ -1293,10 +1297,11 @@ func convertInput(raw json.RawMessage, model string, nsStrategy codextool.Namesp
 				toolInput = data
 			}
 			pendingFCBlocks = append(pendingFCBlocks, format.CoreContentBlock{
-				Type:      "tool_use",
-				ToolUseID: firstNonEmpty(item.CallID, item.ID),
-				ToolName:  item.Name,
-				ToolInput: toolInput,
+				Type:          "tool_use",
+				ToolUseID:     firstNonEmpty(item.CallID, item.ID),
+				ToolName:      item.Name,
+				ToolNamespace: item.Namespace,
+				ToolInput:     toolInput,
 			})
 
 		case role == "system" || role == "developer":
@@ -1579,6 +1584,16 @@ func isToolCallOutputType(itemType string) bool {
 	}
 }
 
+func toolOutputCallIDs(items []inputItem) map[string]bool {
+	ids := make(map[string]bool)
+	for _, item := range items {
+		if isToolCallOutputType(item.Type) && item.CallID != "" {
+			ids[item.CallID] = true
+		}
+	}
+	return ids
+}
+
 // cloneResponse creates a shallow copy of a Response for use in stream events.
 func cloneResponse(r *Response) Response {
 	if r == nil {
@@ -1649,6 +1664,18 @@ func localShellActionFromRaw(raw json.RawMessage) *ToolAction {
 // buildToolOutputItem constructs an OutputItem using the codex_tool_map
 // to determine the correct output item type (function_call, custom_tool_call, local_shell_call).
 func buildToolOutputItem(block format.CoreContentBlock, extensions map[string]any) OutputItem {
+	if block.ToolNamespace != "" {
+		return OutputItem{
+			Type:      "function_call",
+			ID:        block.ToolUseID,
+			CallID:    block.ToolUseID,
+			Name:      block.ToolName,
+			Namespace: block.ToolNamespace,
+			Arguments: toolInputString(block.ToolInput),
+			Input:     toolInputString(block.ToolInput),
+			Status:    "completed",
+		}
+	}
 	toolMap := codextool.DecodeToolMapFromExtensions(extensions)
 	itemT, itemN, itemNS, itemInput, isLS, actionJSON := codextool.OutputItemFromBlock(block.ToolName, block.ToolInput, toolMap)
 	if isLS {
@@ -1800,6 +1827,17 @@ func stripPrefixActionFromJSON(raw string, action string) string {
 	return prefix + ", " + afterValue
 }
 func buildToolOutputItemStreaming(block *format.CoreContentBlock, extensions map[string]any, toolUseID string) OutputItem {
+	if block.ToolNamespace != "" {
+		return OutputItem{
+			Type:      "function_call",
+			ID:        toolUseID,
+			CallID:    toolUseID,
+			Name:      block.ToolName,
+			Namespace: block.ToolNamespace,
+			Arguments: toolInputString(block.ToolInput),
+			Status:    "in_progress",
+		}
+	}
 	toolMap := codextool.DecodeToolMapFromExtensions(extensions)
 	itemT, itemN, itemNS, itemInput, isLS, actionJSON := codextool.OutputItemFromBlock(block.ToolName, block.ToolInput, toolMap)
 	_ = itemInput
@@ -1958,6 +1996,25 @@ func convertToolWithNamespace(tool Tool, namespace string, disablePatchProxy fun
 			Extensions:  ext,
 		}}
 	}
+}
+
+func hasNamespaceTools(tools []Tool) bool {
+	for _, tool := range tools {
+		if tool.Type == "namespace" {
+			return true
+		}
+		if len(tool.Tools) > 0 && hasNamespaceTools(tool.Tools) {
+			return true
+		}
+	}
+	return false
+}
+
+func namespaceForHistory(namespace string, encoded bool) string {
+	if encoded {
+		return ""
+	}
+	return namespace
 }
 
 // flattenToolsWithNamespace recursively flattens namespace tools and converts
