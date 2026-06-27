@@ -1108,22 +1108,37 @@ func (s *Server) handleAdapterStream(
 			}
 			coreEvents = coreResponseToCoreStream(ctx, coreResp)
 		} else {
-			stream, err := acc.AnthropicClient().StreamMessage(ctx, *anthReq)
-			if err != nil {
-				log.Error("adapter stream: StreamMessage failed", "error", err)
+			// Wrap with the search orchestrator when web search is "injected".
+			// The orchestrator intercepts tavily_search / firecrawl_fetch tool
+			// calls and executes them server-side, preventing injected search
+			// tools from leaking through to the client (which wouldn't recognize
+			// them — e.g. Codex CLI only knows the native web_search type).
+			var upstreamStream anthropic.Stream
+			var streamErr error
+			if wsInjected {
+				searchCfg := s.resolvedSearchConfig(candidate.ProviderKey, openAIReq.Model)
+				wrapped := websearchinjected.WrapProvider(
+					acc.AnthropicClient(),
+					searchCfg.tavilyKey, searchCfg.firecrawlKey, searchCfg.maxRounds, s.proxyHTTP,
+				)
+				upstreamStream, streamErr = wrapped.StreamMessage(ctx, *anthReq)
+			} else {
+				upstreamStream, streamErr = acc.AnthropicClient().StreamMessage(ctx, *anthReq)
+			}
+			if streamErr != nil {
+				log.Error("adapter stream: StreamMessage failed", "error", streamErr)
 				payload := openai.ErrorResponse{
 					Error: openai.ErrorObject{
-						Message: fmt.Sprintf("upstream stream error: %v", err),
+						Message: fmt.Sprintf("upstream stream error: %v", streamErr),
 						Type:    "server_error",
 						Code:    "provider_error",
 					},
 				}
-				streamRecord.Error = traceError("stream_message", err)
+				streamRecord.Error = traceError("stream_message", streamErr)
 				streamRecord.OpenAIResponse = payload
 				writeOpenAIError(w, http.StatusBadGateway, payload)
 				return
 			}
-			_ = stream
 
 			providerStream, ok = s.adapterRegistry.GetProviderStream(config.ProtocolAnthropic)
 			if !ok {
@@ -1140,7 +1155,8 @@ func (s *Server) handleAdapterStream(
 				writeOpenAIError(w, http.StatusInternalServerError, payload)
 				return
 			}
-			sr, err = providerToCoreStream(ctx, providerStream, coreReq, stream)
+			var err error
+			sr, err = providerToCoreStream(ctx, providerStream, coreReq, upstreamStream)
 			if err != nil {
 				log.Error("adapter stream: ToCoreStream failed", "error", err)
 				payload := openai.ErrorResponse{
