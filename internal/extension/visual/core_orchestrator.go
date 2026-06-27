@@ -161,14 +161,17 @@ func (o *CoreOrchestrator) CreateCore(ctx context.Context, req *format.CoreReque
 			// can process them on the next round.
 			toolResults := make([]format.CoreContentBlock, 0, len(toolUses))
 			for _, toolUse := range toolUses {
-				result := o.executeCoreVisualTool(ctx, toolUse, availableImages)
+				result := o.executeCoreVisualTool(ctx, req.Model, toolUse, availableImages)
 				toolResults = append(toolResults, format.CoreContentBlock{
 					Type:              "tool_result",
 					ToolUseID:         toolUse.ToolUseID,
 					ToolResultContent: []format.CoreContentBlock{{Type: "text", Text: result}},
 				})
 			}
-			req.Messages = append(req.Messages, *lastAssistant)
+			// Sanitize the assistant message to remove empty text blocks that would
+			// cause validation errors when sent back to the provider.
+			sanitizedAssistant := sanitizeAssistantMessage(*lastAssistant)
+			req.Messages = append(req.Messages, sanitizedAssistant)
 			req.Messages = append(req.Messages, format.CoreMessage{
 				Role:    "tool",
 				Content: toolResults,
@@ -183,7 +186,7 @@ func (o *CoreOrchestrator) CreateCore(ctx context.Context, req *format.CoreReque
 		// Execute each visual tool via the vision client.
 		toolResults := make([]format.CoreContentBlock, 0, len(toolUses))
 		for _, toolUse := range toolUses {
-			result := o.executeCoreVisualTool(ctx, toolUse, availableImages)
+			result := o.executeCoreVisualTool(ctx, req.Model, toolUse, availableImages)
 			toolResults = append(toolResults, format.CoreContentBlock{
 				Type:              "tool_result",
 				ToolUseID:         toolUse.ToolUseID,
@@ -192,7 +195,10 @@ func (o *CoreOrchestrator) CreateCore(ctx context.Context, req *format.CoreReque
 		}
 
 		// Append assistant message and tool_result message for next round.
-		req.Messages = append(req.Messages, *lastAssistant)
+		// Sanitize the assistant message to remove empty text blocks that would
+		// cause validation errors when sent back to the provider.
+		sanitizedAssistant := sanitizeAssistantMessage(*lastAssistant)
+		req.Messages = append(req.Messages, sanitizedAssistant)
 		req.Messages = append(req.Messages, format.CoreMessage{
 			Role:    "tool",
 			Content: toolResults,
@@ -324,7 +330,7 @@ func coreSplitVisualToolUses(blocks []format.CoreContentBlock) (visualUses, nonV
 }
 
 // executeCoreVisualTool runs the vision model and returns a formatted result string.
-func (o *CoreOrchestrator) executeCoreVisualTool(ctx context.Context, toolUse format.CoreContentBlock, availableImages []ImageInput) string {
+func (o *CoreOrchestrator) executeCoreVisualTool(ctx context.Context, model string, toolUse format.CoreContentBlock, availableImages []ImageInput) string {
 	request, err := coreAnalysisRequestFromToolUse(toolUse, availableImages)
 	if err != nil {
 		result := "Visual error: " + err.Error()
@@ -340,7 +346,7 @@ func (o *CoreOrchestrator) executeCoreVisualTool(ctx context.Context, toolUse fo
 	}
 	result, err := o.client.Analyze(ctx, request)
 	if err != nil {
-		slog.Default().Warn("Visual tool execution failed", "tool", toolUse.ToolName, "error", err)
+		slog.Default().Warn("Visual tool execution failed", "model", model, "tool", toolUse.ToolName, "error", err)
 		formatted := "Visual error: " + err.Error()
 		o.recordVisualEvent(CoreTraceEvent{
 			Stage:        "visual_tool",
@@ -353,7 +359,7 @@ func (o *CoreOrchestrator) executeCoreVisualTool(ctx context.Context, toolUse fo
 		})
 		return formatted
 	}
-	slog.Default().Info("Visual tool executed", "tool", toolUse.ToolName, "images", len(request.Images))
+	slog.Default().Info("Visual tool executed", "model", model, "tool", toolUse.ToolName, "images", len(request.Images))
 	formatted := strings.TrimSpace(result)
 	switch toolUse.ToolName {
 	case ToolVisualBrief:
@@ -588,4 +594,28 @@ func cloneCoreRequest(req *format.CoreRequest) *format.CoreRequest {
 		return &cloned
 	}
 	return &cloned
+}
+
+// sanitizeAssistantMessage removes empty text blocks from an assistant message
+// to prevent validation errors when the message is sent back to the provider.
+// Some providers (e.g., deepseek-v4-pro) return responses with empty text blocks
+// that have no "text" field, which causes JSON validation errors on subsequent requests.
+func sanitizeAssistantMessage(msg format.CoreMessage) format.CoreMessage {
+	if len(msg.Content) == 0 {
+		return msg
+	}
+	sanitized := make([]format.CoreContentBlock, 0, len(msg.Content))
+	for _, block := range msg.Content {
+		// Skip empty text blocks - they cause validation errors
+		if block.Type == "text" && strings.TrimSpace(block.Text) == "" {
+			continue
+		}
+		sanitized = append(sanitized, block)
+	}
+	// If all blocks were filtered out, keep at least one to avoid empty messages
+	if len(sanitized) == 0 {
+		return msg
+	}
+	msg.Content = sanitized
+	return msg
 }

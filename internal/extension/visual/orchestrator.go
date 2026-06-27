@@ -78,7 +78,7 @@ func (o *Orchestrator) CreateMessage(ctx context.Context, req anthropic.MessageR
 			// Execute visual tools, feed results to model.
 			toolResults := make([]anthropic.ContentBlock, 0, len(toolUses))
 			for _, toolUse := range toolUses {
-				result := o.executeVisualTool(ctx, toolUse, availableImages)
+				result := o.executeVisualTool(ctx, req.Model, toolUse, availableImages)
 				toolResults = append(toolResults, anthropic.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: toolUse.ID,
@@ -100,7 +100,7 @@ func (o *Orchestrator) CreateMessage(ctx context.Context, req anthropic.MessageR
 
 		toolResults := make([]anthropic.ContentBlock, 0, len(toolUses))
 		for _, toolUse := range toolUses {
-			result := o.executeVisualTool(ctx, toolUse, availableImages)
+			result := o.executeVisualTool(ctx, req.Model, toolUse, availableImages)
 			toolResults = append(toolResults, anthropic.ContentBlock{
 				Type:      "tool_result",
 				ToolUseID: toolUse.ID,
@@ -161,7 +161,7 @@ func (o *Orchestrator) StreamMessage(ctx context.Context, req anthropic.MessageR
 			// Execute visual tools, feed results to model.
 			toolResults := make([]anthropic.ContentBlock, 0, len(toolUses))
 			for _, toolUse := range toolUses {
-				result := o.executeVisualTool(ctx, toolUse, availableImages)
+				result := o.executeVisualTool(ctx, req.Model, toolUse, availableImages)
 				toolResults = append(toolResults, anthropic.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: toolUse.ID,
@@ -183,7 +183,7 @@ func (o *Orchestrator) StreamMessage(ctx context.Context, req anthropic.MessageR
 
 		toolResults := make([]anthropic.ContentBlock, 0, len(toolUses))
 		for _, toolUse := range toolUses {
-			result := o.executeVisualTool(ctx, toolUse, availableImages)
+			result := o.executeVisualTool(ctx, req.Model, toolUse, availableImages)
 			toolResults = append(toolResults, anthropic.ContentBlock{
 				Type:      "tool_result",
 				ToolUseID: toolUse.ID,
@@ -277,17 +277,17 @@ func visualAttachmentText(index int) string {
 	return fmt.Sprintf("[Image #%d is available to Visual Brief and Visual QA. Use image_refs [\"Image #%d\"] or omit image fields to analyze attached images.]", index, index)
 }
 
-func (o *Orchestrator) executeVisualTool(ctx context.Context, toolUse anthropic.ContentBlock, availableImages []ImageInput) string {
+func (o *Orchestrator) executeVisualTool(ctx context.Context, model string, toolUse anthropic.ContentBlock, availableImages []ImageInput) string {
 	request, err := analysisRequestFromToolUse(toolUse, availableImages)
 	if err != nil {
 		return "Visual error: " + err.Error()
 	}
 	result, err := o.client.Analyze(ctx, request)
 	if err != nil {
-		slog.Default().Warn("Visual tool execution failed", "tool", toolUse.Name, "error", err)
+		slog.Default().Warn("Visual tool execution failed", "model", model, "tool", toolUse.Name, "error", err)
 		return "Visual error: " + err.Error()
 	}
-	slog.Default().Info("Visual tool executed", "tool", toolUse.Name, "images", len(request.Images))
+	slog.Default().Info("Visual tool executed", "model", model, "tool", toolUse.Name, "images", len(request.Images))
 	switch toolUse.Name {
 	case ToolVisualBrief:
 		return "Visual Brief result:\n" + strings.TrimSpace(result)

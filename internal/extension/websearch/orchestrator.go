@@ -13,7 +13,8 @@ import (
 )
 
 // ToolHandler executes a tool given its input and returns a formatted result string.
-type ToolHandler func(context.Context, json.RawMessage) (string, error)
+// The model parameter is the upstream model name that triggered the tool call.
+type ToolHandler func(ctx context.Context, model string, input json.RawMessage) (string, error)
 
 // Orchestrator wraps an Anthropic client and transparently executes
 // web_search / web_fetch (or tavily_search / firecrawl_fetch in injected mode)
@@ -118,9 +119,9 @@ func (o *Orchestrator) CreateMessage(ctx context.Context, req anthropic.MessageR
 		if len(nonSearchUses) > 0 {
 			// Execute search tools first as a side effect.
 			for _, tu := range searchUses {
-				_, execErr := o.executeSearch(ctx, tu)
+				_, execErr := o.executeSearch(ctx, req.Model, tu)
 				if execErr != nil {
-					log.Warn("搜索执行失败（混合调用）", "tool", tu.Name, "error", execErr)
+					log.Warn("搜索执行失败（混合调用）", "model", req.Model, "tool", tu.Name, "error", execErr)
 				}
 			}
 			// Filter search tool_uses from the response content.
@@ -139,13 +140,16 @@ func (o *Orchestrator) CreateMessage(ctx context.Context, req anthropic.MessageR
 			return resp, nil
 		}
 
-		toolResults := o.buildToolResults(ctx, searchUses)
+		toolResults := o.buildToolResults(ctx, req.Model, searchUses)
 
 		// Append the assistant message (with search tool_use blocks) and
 		// user message (with tool_results) to the request for the next round.
+		// Filter empty text blocks defensively — some upstreams may emit a
+		// text block with no Text content; sending that back as history
+		// fails strict schema validation (422).
 		req.Messages = append(req.Messages, anthropic.Message{
 			Role:    "assistant",
-			Content: resp.Content,
+			Content: filterEmptyTextBlocks(resp.Content),
 		})
 		req.Messages = append(req.Messages, anthropic.Message{
 			Role:    "user",
@@ -219,9 +223,9 @@ func (o *Orchestrator) StreamMessage(ctx context.Context, req anthropic.MessageR
 		if len(nonSearchUses) > 0 {
 			// Execute search tools as side effect, but return only non-search content.
 			for _, tu := range searchUses {
-				_, execErr := o.executeSearch(ctx, tu)
+				_, execErr := o.executeSearch(ctx, req.Model, tu)
 				if execErr != nil {
-					log.Warn("流式搜索执行失败（混合调用）", "tool", tu.Name, "error", execErr)
+					log.Warn("流式搜索执行失败（混合调用）", "model", req.Model, "tool", tu.Name, "error", execErr)
 				}
 			}
 			// Filter search tool_uses from the returned events.
@@ -232,11 +236,19 @@ func (o *Orchestrator) StreamMessage(ctx context.Context, req anthropic.MessageR
 			return &staticStream{events: allEvents}, nil
 		}
 
-		toolResults := o.buildToolResults(ctx, searchUses)
+		toolResults := o.buildToolResults(ctx, req.Model, searchUses)
 
+		// Filter out empty text blocks from the reconstructed assistant content.
+		// The upstream model may emit a content_block_start for a text block
+		// followed by no actual text deltas (e.g. when the response is purely
+		// thinking + tool_use). ContentBlock's Text field uses `json:"text,omitempty"`,
+		// so an empty Text serializes as `{"type":"text"}` without the required
+		// `text` field — strict upstream validators (Claude schema) reject this
+		// with a 422. Strip such blocks before feeding them back as history.
+		assistantContent := filterEmptyTextBlocks(collectContentFromEvents(events))
 		req.Messages = append(req.Messages, anthropic.Message{
 			Role:    "assistant",
-			Content: collectContentFromEvents(events),
+			Content: assistantContent,
 		})
 		req.Messages = append(req.Messages, anthropic.Message{
 			Role:    "user",
@@ -250,15 +262,15 @@ func (o *Orchestrator) StreamMessage(ctx context.Context, req anthropic.MessageR
 }
 
 // executeSearch runs a Tavily search or Firecrawl fetch based on the tool_use block.
-func (o *Orchestrator) executeSearch(ctx context.Context, tu anthropic.ContentBlock) (string, error) {
+func (o *Orchestrator) executeSearch(ctx context.Context, model string, tu anthropic.ContentBlock) (string, error) {
 	handler, ok := o.toolHandlers[tu.Name]
 	if !ok {
 		return "", fmt.Errorf("unknown search tool: %s", tu.Name)
 	}
-	return handler(ctx, tu.Input)
+	return handler(ctx, model, tu.Input)
 }
 
-func (o *Orchestrator) executeTavilySearch(ctx context.Context, raw json.RawMessage) (string, error) {
+func (o *Orchestrator) executeTavilySearch(ctx context.Context, model string, raw json.RawMessage) (string, error) {
 	var params struct {
 		Query          string   `json:"query"`
 		SearchDepth    string   `json:"search_depth,omitempty"`
@@ -289,10 +301,17 @@ func (o *Orchestrator) executeTavilySearch(ctx context.Context, raw json.RawMess
 	if err != nil {
 		return "", err
 	}
+	slog.Default().Info("Web search completed",
+		"model", model,
+		"tool", "tavily_search",
+		"query", params.Query,
+		"results", len(result.Results),
+		"response_time", result.ResponseTime,
+	)
 	return FormatTavilyResults(result), nil
 }
 
-func (o *Orchestrator) executeFirecrawlFetch(ctx context.Context, raw json.RawMessage) (string, error) {
+func (o *Orchestrator) executeFirecrawlFetch(ctx context.Context, model string, raw json.RawMessage) (string, error) {
 	var params struct {
 		URL string `json:"url"`
 	}
@@ -311,6 +330,11 @@ func (o *Orchestrator) executeFirecrawlFetch(ctx context.Context, raw json.RawMe
 	if err != nil {
 		return "", err
 	}
+	slog.Default().Info("Web fetch completed",
+		"model", model,
+		"tool", "firecrawl_fetch",
+		"url", params.URL,
+	)
 	return FormatFirecrawlResult(result), nil
 }
 
@@ -321,13 +345,13 @@ func (o *Orchestrator) isSearchTool(name string) bool {
 }
 
 // buildToolResults executes search/fetch for each tool use and returns tool_result blocks.
-func (o *Orchestrator) buildToolResults(ctx context.Context, searchUses []anthropic.ContentBlock) []anthropic.ContentBlock {
+func (o *Orchestrator) buildToolResults(ctx context.Context, model string, searchUses []anthropic.ContentBlock) []anthropic.ContentBlock {
 	log := slog.Default()
 	results := make([]anthropic.ContentBlock, 0, len(searchUses))
 	for _, tu := range searchUses {
-		result, execErr := o.executeSearch(ctx, tu)
+		result, execErr := o.executeSearch(ctx, model, tu)
 		if execErr != nil {
-			log.Warn("搜索执行失败", "tool", tu.Name, "error", execErr)
+			log.Warn("搜索执行失败", "model", model, "tool", tu.Name, "error", execErr)
 			results = append(results, anthropic.ContentBlock{
 				Type:      "tool_result",
 				ToolUseID: tu.ID,
@@ -398,6 +422,24 @@ func splitToolUses(blocks []anthropic.ContentBlock) (toolUses, others []anthropi
 		}
 	}
 	return
+}
+
+// filterEmptyTextBlocks drops text-type content blocks whose Text field is empty.
+// This prevents sending `{"type":"text"}` (without a `text` field) back to the
+// upstream, which strict schema validators reject with 422. A text block may
+// end up empty when the upstream model emits content_block_start for a text
+// block but no actual text deltas (e.g. the response is purely thinking +
+// tool_use). Other block types (thinking, tool_use, tool_result) are passed
+// through unchanged.
+func filterEmptyTextBlocks(blocks []anthropic.ContentBlock) []anthropic.ContentBlock {
+	filtered := make([]anthropic.ContentBlock, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text == "" {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered
 }
 
 // subtractToolUses returns tool_use blocks in a that are not in b.

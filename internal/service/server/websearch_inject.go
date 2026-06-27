@@ -145,7 +145,7 @@ func (s *Server) executeChatSearchLoop(
 			// Execute search calls as side effect, return only non-search content.
 			var toolResultMsgs []chat.ChatMessage
 			for _, tc := range searchCalls {
-				result, execErr := executeChatSearchCall(ctx, tavily, firecrawl, tc)
+				result, execErr := executeChatSearchCall(ctx, req.Model, tavily, firecrawl, tc)
 				if execErr != nil {
 					log.Warn("Chat搜索执行失败（混合调用）", "tool", tc.Function.Name, "error", execErr)
 					result = fmt.Sprintf("Search error: %s", execErr.Error())
@@ -164,7 +164,7 @@ func (s *Server) executeChatSearchLoop(
 		// Execute search/fetch calls.
 		var toolResultMsgs []chat.ChatMessage
 		for _, tc := range searchCalls {
-			result, execErr := executeChatSearchCall(ctx, tavily, firecrawl, tc)
+			result, execErr := executeChatSearchCall(ctx, req.Model, tavily, firecrawl, tc)
 			if execErr != nil {
 				log.Warn("搜索执行失败", "tool", tc.Function.Name, "error", execErr)
 				result = fmt.Sprintf("Search error: %s", execErr.Error())
@@ -188,6 +188,7 @@ func (s *Server) executeChatSearchLoop(
 
 func executeChatSearchCall(
 	ctx context.Context,
+	model string,
 	tavily *websearch.TavilyClient,
 	firecrawl *websearch.FirecrawlClient,
 	tc chat.ToolCall,
@@ -215,6 +216,12 @@ func executeChatSearchCall(
 		if err != nil {
 			return "", err
 		}
+		slog.Default().Info("Chat web search completed",
+			"model", model,
+			"tool", tc.Function.Name,
+			"query", params.Query,
+			"results", len(result.Results),
+		)
 		return websearch.FormatTavilyResults(result), nil
 
 	case "firecrawl_fetch":
@@ -238,6 +245,11 @@ func executeChatSearchCall(
 		if err != nil {
 			return "", err
 		}
+		slog.Default().Info("Chat web fetch completed",
+			"model", model,
+			"tool", "firecrawl_fetch",
+			"url", params.URL,
+		)
 		return websearch.FormatFirecrawlResult(result), nil
 
 	default:
@@ -345,7 +357,7 @@ func (s *Server) executeGoogleSearchLoop(
 			// Execute search calls as side effect, feed results to the model.
 			responseParts := make([]google.Part, 0, len(searchCalls))
 			for _, fc := range searchCalls {
-				result, execErr := executeGoogleSearchCall(ctx, tavily, firecrawl, fc)
+				result, execErr := executeGoogleSearchCall(ctx, model, tavily, firecrawl, fc)
 				if execErr != nil {
 					log.Warn("Google搜索执行失败（混合调用）", "tool", fc.Name, "error", execErr)
 					result = execErr.Error()
@@ -376,7 +388,7 @@ func (s *Server) executeGoogleSearchLoop(
 		// Execute search calls and build function responses.
 		responseParts := make([]google.Part, 0, len(searchCalls))
 		for _, fc := range searchCalls {
-			result, execErr := executeGoogleSearchCall(ctx, tavily, firecrawl, fc)
+			result, execErr := executeGoogleSearchCall(ctx, model, tavily, firecrawl, fc)
 			if execErr != nil {
 				log.Warn("Google 搜索执行失败", "tool", fc.Name, "error", execErr)
 				result = fmt.Sprintf("Search error: %s", execErr.Error())
@@ -441,6 +453,7 @@ func filterGoogleNonSearchCalls(calls []google.FunctionCall) []google.FunctionCa
 
 func executeGoogleSearchCall(
 	ctx context.Context,
+	model string,
 	tavily *websearch.TavilyClient,
 	firecrawl *websearch.FirecrawlClient,
 	fc google.FunctionCall,
@@ -465,6 +478,12 @@ func executeGoogleSearchCall(
 		if err != nil {
 			return "", err
 		}
+		slog.Default().Info("Google web search completed",
+			"model", model,
+			"tool", fc.Name,
+			"query", params.Query,
+			"results", len(result.Results),
+		)
 		return websearch.FormatTavilyResults(result), nil
 
 	case "firecrawl_fetch":
@@ -489,6 +508,11 @@ func executeGoogleSearchCall(
 		if err != nil {
 			return "", err
 		}
+		slog.Default().Info("Google web fetch completed",
+			"model", model,
+			"tool", "firecrawl_fetch",
+			"url", params.URL,
+		)
 		return websearch.FormatFirecrawlResult(result), nil
 
 	default:
@@ -562,7 +586,7 @@ func (s *Server) chatSearchBufferedStream(
 			// Execute search calls, feed results to next round.
 			var toolResultMsgs []chat.ChatMessage
 			for _, tc := range searchCalls {
-				result, execErr := executeChatSearchCall(ctx, tavily, firecrawl, tc)
+				result, execErr := executeChatSearchCall(ctx, req.Model, tavily, firecrawl, tc)
 				if execErr != nil {
 					log.Warn("流式搜索执行失败（混合调用）", "tool", tc.Function.Name, "error", execErr)
 					result = fmt.Sprintf("Search error: %s", execErr.Error())
@@ -590,7 +614,7 @@ func (s *Server) chatSearchBufferedStream(
 		// Execute search calls.
 		var toolResultMsgs []chat.ChatMessage
 		for _, tc := range searchCalls {
-			result, execErr := executeChatSearchCall(ctx, tavily, firecrawl, tc)
+			result, execErr := executeChatSearchCall(ctx, req.Model, tavily, firecrawl, tc)
 			if execErr != nil {
 				log.Warn("搜索执行失败", "tool", tc.Function.Name, "error", execErr)
 				result = fmt.Sprintf("Search error: %s", execErr.Error())
