@@ -1,160 +1,560 @@
 # yaml-language-server: $schema=./config.schema.json
 # =============================================================================
-# MoonBridge Configuration Example
+# MoonBridge 完整配置示例 / Full Configuration Reference
 # =============================================================================
-# This file documents every configurable field and serves as a live reference.
-# Uncomment and adjust values for your own deployment.
+#
+# 本文件包含所有可配置字段及其详细说明，可直接作为部署参考。
+# This file documents every configurable field with detailed comments.
+#
+# 默认配置路径: $HOME/moonbridge/config.yml
+# 可通过 -config 命令行参数指定其他路径。
+# 首次运行时如果默认路径不存在配置，MoonBridge 会自动创建最小化配置。
+#
+# =============================================================================
 
-# --- Operating Mode ----------------------------------------------------------
-mode: "Transform"   # Transform | CaptureAnthropic | CaptureResponse
 
-# --- Tracing -----------------------------------------------------------------
+# =============================================================================
+# 运行模式 / Operating Mode [必填]
+# =============================================================================
+# MoonBridge 支持三种运行模式：
+#   - Transform（推荐）: 正常代理模式。接收 Codex 请求，转换格式后转发到上游
+#                        provider。需要配置 providers、models 和 routes。
+#   - CaptureResponse:   透明抓包模式。监听并记录 OpenAI Responses API 流量，
+#                        不修改请求。需要配置 proxy.response。
+#   - CaptureAnthropic:  透明抓包模式。监听并记录 Anthropic Messages API 流量，
+#                        不修改请求。需要配置 proxy.anthropic。
+mode: "Transform"
+
+
+# =============================================================================
+# 请求追踪 / Request Tracing
+# =============================================================================
+# 开启后会将完整的请求/响应内容写入 data/trace/ 目录。
+# 建议仅在调试时开启，生产环境关闭以避免磁盘占用和敏感数据泄露。
 trace:
-  enabled: false    # Dump full request/response traces to data/trace/
+  # 是否启用请求追踪。默认 false。
+  enabled: false
 
-# --- Logging -----------------------------------------------------------------
+# 向后兼容的旧字段名，与 trace.enabled 等效。
+# 若同时设置，以 trace.enabled 为准。
+# trace_requests: false
+
+
+# =============================================================================
+# 日志 / Logging
+# =============================================================================
 log:
-  level: "info"     # debug | info | warn | error | off
-  format: "text"    # text | json
+  # 日志级别。可选值：debug | info | warn | error | off
+  #   debug: 输出所有调试信息，包括请求/响应体（含敏感数据，仅本地调试用）。
+  #   info:  标准运行日志（默认）。记录请求摘要和关键事件。
+  #   warn:  仅输出警告和错误。
+  #   error: 仅输出错误。
+  #   off:   完全静默。
+  level: "info"
 
-# --- Server ------------------------------------------------------------------
+  # 日志格式。可选值：text | json
+  #   text: 人类可读的彩色输出，适合终端查看（默认）。
+  #   json: 结构化 JSON 日志，适合日志收集系统（如 ELK、Loki、Datadog）。
+  format: "text"
+
+
+# =============================================================================
+# 服务端 / Server
+# =============================================================================
 server:
+  # 监听地址。格式为 <ip>:<port> 或 :<port>（监听所有接口）。
+  # 默认值：127.0.0.1:38440
+  # 安全提示：生产环境建议仅监听 127.0.0.1，通过反向代理（如 nginx/caddy）
+  #          对外暴露，由反向代理处理 TLS 终止和认证。
   addr: "127.0.0.1:38440"
-  # auth_token: "replace-with-your-secret-token"   # Bearer auth (omit for none)
-  # max_sessions: 100                               # 0 = unlimited
-  # session_ttl: "24h"                              # idle session timeout
 
-# --- Defaults ----------------------------------------------------------------
+  # 认证令牌（可选）。
+  # 设置后客户端必须在 Authorization: Bearer <token> 请求头中提供此令牌。
+  # 不设置则不启用认证（任何能访问此地址的客户端均可使用）。
+  # auth_token: "your-secret-token-here"
+
+  # 最大并发会话数。0 表示不限制（默认）。
+  # 超过限制时新请求返回 503 Service Unavailable。
+  # max_sessions: 100
+
+  # 会话空闲超时时间。支持 Go duration 格式（如 "30m", "1h", "24h"）。
+  # 默认值："24h"。超时后会话被清除，后续请求需创建新会话。
+  # session_ttl: "24h"
+
+
+# =============================================================================
+# 默认值 / Defaults
+# =============================================================================
 defaults:
+  # 默认模型别名。当客户端未指定 model 参数时使用的路由别名。
+  # 必须指向 routes 中已配置的条目，或使用 "provider/model" 格式直接引用。
+  # 如果未设置，按以下优先级自动选择：
+  #   1. routes 中存在 "moonbridge" 路由 → 使用 "moonbridge"
+  #   2. routes 中只有一条路由 → 使用该路由
+  #   3. 其他情况 → 空字符串（可能导致请求失败）
   model: "moonbridge"
-  max_tokens: 65536
-  # How Codex namespace tools (e.g. MCP servers, exposed as mcp__<server>) are
-  # translated into upstream tools.
-  #   flat          (default) each sub-tool becomes an independent function tool
-  #                  with a simple object schema — most compatible across upstreams
-  #   nested_oneof  one tool per namespace, input_schema uses top-level oneOf
-  #   nested_anyof  one tool per namespace, action enum + params anyOf
-  # Flat is recommended: some upstreams/models fail to call oneOf/anyOf tools
-  # reliably (empty input) and the flat path keeps multi-turn history consistent.
-  namespace_strategy: "flat"
-  # system_prompt: ""                               # prepended to every request
 
-# --- Top-Level Web Search ----------------------------------------------------
-# These values apply when no provider/model/route-level override is set.
+  # 默认最大输出 token 数。当客户端未指定 max_tokens 时使用。
+  # 同时作为全局回退值（当 route 和 model 都没有设置时）。
+  # 默认值：1024
+  max_tokens: 65536
+
+  # 全局系统提示词（可选）。会附加在每次请求的最前面。
+  # 空字符串表示不添加。建议通过 Codex 的 AGENTS.md 或指令系统管理提示词。
+  # system_prompt: ""
+
+  # Codex 命名空间策略。控制如何将 Codex 的 MCP 工具（如 mcp__server__tool）
+  # 翻译为上游 provider 能理解的 tool 格式。仅在 Transform 模式下生效。
+  #
+  # 可选值：
+  #   flat（默认，推荐）: 每个子工具展开为独立的 function tool，使用简单的
+  #                      object schema。兼容性最好。某些上游模型在调用
+  #                      oneOf/anyOf 工具时可能失败（空输入），flat 路径能
+  #                      保持多轮对话历史一致。
+  #   nested_oneof:      每个命名空间合并为一个 tool，input_schema 使用
+  #                      top-level oneOf 描述子工具。
+  #   nested_anyof:      每个命名空间合并为一个 tool，使用 action 枚举 +
+  #                      params anyOf 描述子工具。
+  namespace_strategy: "flat"
+
+
+# =============================================================================
+# 全局 Web 搜索 / Top-Level Web Search
+# =============================================================================
+# Web 搜索功能允许模型在需要时调用搜索引擎获取实时信息。
+#
+# 配置优先级（从高到低）：route → model → provider → 全局
+# 即：如果在 route 级别配置了 web_search，会覆盖 model/provider/全局的配置。
+#
 # web_search:
-#   support: "auto"              # auto | enabled | disabled | injected
-#   tavily_api_key: "tvly-..."
-#   firecrawl_api_key: "fc-..."
+#   # 搜索支持模式。可选值：
+#   #   auto（默认）: 自动判断。模型在认为必要时可调用搜索工具。
+#   #   enabled:     始终注入搜索工具。每个请求都可使用搜索。
+#   #   disabled:    完全禁用搜索工具注入。
+#   #   injected:    在发送请求前由 MoonBridge 主动执行搜索，并将结果注入到
+#   #                system prompt 中。需要配置 tavily_api_key 和
+#   #                search_max_rounds。此模式不依赖模型的 tool calling 能力。
+#   support: "auto"
+#
+#   # 搜索工具最大调用次数（auto/enabled 模式下有效）。
+#   # 模型在一次对话中最多调用搜索工具的次数。
+#   # 默认值：8
+#   max_uses: 8
+#
+#   # Tavily 搜索 API 密钥。injected 模式必需。
+#   # 注册地址：https://tavily.com
+#   # tavily_api_key: "tvly-..."
+#
+#   # Firecrawl 网页抓取 API 密钥（可选）。
+#   # 用于抓取搜索结果的完整网页内容，可显著提升搜索质量。
+#   # 注册地址：https://firecrawl.dev
+#   # firecrawl_api_key: "fc-..."
+#
+#   # injected 模式下的搜索轮次上限。每轮可触发一次搜索，多轮逐步细化查询。
+#   # 默认值：5
 #   search_max_rounds: 5
 
-# --- Outbound Proxy ----------------------------------------------------------
-# HTTP(S) proxy for all upstream API calls. Two comma-separated values:
-# first = HTTP(S), second = SOCKS5 fallback.
+
+# =============================================================================
+# 出站代理 / Egress Proxy
+# =============================================================================
+# HTTP(S) 代理地址。所有发往上游 provider 的 API 调用都会经过此代理。
+#
+# 格式：http://host:port 或 socks5://host:port
+# 留空表示直连（不走代理）。
+#
+# 使用场景：
+#   - 需要通过代理访问被墙的 API（如 OpenAI、Anthropic）
+#   - 需要通过企业内网代理出站
+#   - 需要通过代理固定出站 IP
 egress_proxy: "http://127.0.0.1:7890"
 
-# --- Cache -------------------------------------------------------------------
+
+# =============================================================================
+# Prompt 缓存 / Cache
+# =============================================================================
+# 控制 Anthropic prompt caching 行为。仅对 protocol 为 "anthropic" 的 provider
+# 生效（其他协议忽略缓存配置）。
+#
+# Prompt caching 可以显著降低 API 费用（缓存读取比正常读取便宜 90%+），
+# 同时缩短响应延迟。适合有大量重复 system prompt 或上下文前缀的场景。
 cache:
-  mode: "explicit"               # off | automatic | explicit | hybrid
-  ttl: "5m"                      # 5m | 1h
+  # 缓存模式。可选值：
+  #   off:        完全不使用 prompt caching（默认）。
+  #   automatic:  由 MoonBridge 根据启发式算法自动决定在何处插入
+  #               cache_control breakpoint。自动评估每个消息块的缓存价值
+  #               （token 数、预计重用次数等）。
+  #   explicit:   仅当客户端请求中已包含 cache_control breakpoint 时启用
+  #               缓存。MoonBridge 不做自动注入，完全尊重上游控制。
+  #   hybrid:     结合 automatic 和 explicit 模式。尊重客户端已有的
+  #               breakpoint，同时在合适位置自动补充额外 breakpoint。
+  mode: "explicit"
+
+  # 缓存生存时间。可选值：5m | 1h
+  #   5m: 缓存 5 分钟后过期（适合频繁变化的对话上下文）。
+  #   1h: 缓存 1 小时后过期（适合高度稳定、重度重用的上下文前缀）。
+  ttl: "5m"
+
+  # 是否启用 prompt caching 功能。关闭后所有缓存相关逻辑都不生效。
+  # 默认值：true
   prompt_caching: true
+
+  # automatic/hybrid 模式下，是否自动插入 cache_control breakpoint。
+  # 默认值：true。设置为 false 后不再自动注入任何 breakpoint。
   automatic_prompt_cache: false
+
+  # 是否允许客户端通过显式 cache_control 标记来请求缓存断点。
+  # 默认值：true
   explicit_cache_breakpoints: true
+
+  # 是否允许上游 provider 将缓存保留等级降级。
+  # Anthropic 的 prompt caching 有 "ephemeral"（5 分钟）等级。
+  # 开启此选项后允许 provider 将缓存降级为不缓存，可能增加命中率但牺牲可靠性。
+  # 默认值：false
   allow_retention_downgrade: false
+
+  # 最大 breakpoint 数量。单次请求中最多插入的缓存断点数。
+  # 断点越多→缓存粒度越细→命中率可能更高，但请求体积也越大。
+  # 默认值：4
   max_breakpoints: 4
+
+  # 最小缓存 token 数。只有 token 数 >= 此值的消息块才会被考虑缓存。
+  # 太小的缓存块性价比低（缓存写入开销可能超过后续读取节省的费用）。
+  # 默认值：1024
   min_cache_tokens: 1024
+
+  # 预期重用次数。用于 automatic 模式的缓存价值评估算法。
+  # 缓存价值 ≈ token_count × expected_reuse
+  # 默认值：2。值越大，缓存的"回本"阈值越高，插入断点的策略越保守。
   expected_reuse: 2
+
+  # 最小缓存价值分数。只有价值分 >= 此值才缓存。
+  # 算法：value_score = token_count × expected_reuse
+  # 默认值：2048（约等于 2 次重用 1024 token 的价值）
   minimum_value_score: 2048
+
+  # 两个相邻 breakpoint 之间的最小 token 间隔。
+  # 防止 breakpoint 过于密集导致请求体积膨胀和传输损耗。
+  # 默认值：1024
   min_breakpoint_tokens: 1024
 
-# --- Persistence (management API storage) ------------------------------------
-persistence:
-  active_provider: db_sqlite     # db_sqlite | db_d1
 
-# --- Proxy (Capture modes only) ----------------------------------------------
-# Required when mode is CaptureResponse or CaptureAnthropic.
+# =============================================================================
+# 持久化 / Persistence
+# =============================================================================
+# 管理 API 的存储后端配置。用于存储会话数据、请求指标、配置快照等持久化数据。
+persistence:
+  # 活跃的存储 provider。可选值：db_sqlite | db_d1
+  #   db_sqlite: 使用本地 SQLite 数据库文件（默认，适合本地开发和单机部署）。
+  #   db_d1:     使用 Cloudflare D1 数据库（仅限 Cloudflare Workers 部署）。
+  active_provider: db_sqlite
+
+
+# =============================================================================
+# 抓包代理 / Proxy (Capture Modes Only)
+# =============================================================================
+# 仅在 mode 为 CaptureResponse 或 CaptureAnthropic 时需要配置。
+# 用于指定抓包流量的上游转发目标。Transform 模式下忽略此区块。
+#
+# 使用场景：
+#   - 抓取 Codex CLI ↔ OpenAI/Anthropic 之间的原始 API 流量用于分析
+#   - 调试 prompt 格式转换是否正确
+#   - 收集请求/响应样本用于模型评估
+#
 proxy:
+  # OpenAI Responses API 抓包配置
   response:
+    # 上游 provider 的 base URL（必填，末尾不要有 /）。
+    # 例如 OpenAI 官方 API: https://api.openai.com
     base_url: "https://api.openai.com"
+
+    # 上游 provider 的 API 密钥（必填）。
     api_key: "replace-with-real-openai-key"
-    model: "gpt-5.5"             # default model for /v1/responses pass-through
+
+    # 默认透传模型名。当客户端请求未指定 model 参数时使用此值。
+    model: "gpt-5.5"
+
+  # Anthropic Messages API 抓包配置
   anthropic:
+    # 上游 provider 的 base URL（必填，末尾不要有 /）。
+    # 例如 Anthropic 官方 API: https://api.anthropic.com
     base_url: "https://api.anthropic.com"
+
+    # 上游 provider 的 API 密钥（必填）。
     api_key: "replace-with-real-anthropic-key"
+
+    # 默认透传模型名。当客户端请求未指定 model 参数时使用此值。
+    # model: "claude-sonnet-4-20250514"
+
+    # Anthropic API 版本号。默认 "2023-06-01"。
     version: "2023-06-01"
 
-# --- Extensions --------------------------------------------------------------
+
+# =============================================================================
+# 扩展 / Extensions
+# =============================================================================
+# 扩展（Extensions）是 MoonBridge 的插件系统，提供可选的功能模块。
+#
+# 每个扩展可在四个层级独立配置开关和参数：
+#   1. global（全局）    — extensions 下的顶级配置
+#   2. provider（提供者） — providers.<name>.extensions
+#   3. model（模型）      — models.<slug>.extensions
+#   4. route（路由）      — routes.<alias>.extensions
+#
+# 优先级：route > model > provider > global（更高层级的配置覆盖低层级）
+#
+# 通用配置格式：
+#   extensions:
+#     <extension_name>:
+#       enabled: true|false   # 是否启用（默认值由扩展自身定义）
+#       config:               # 扩展特定的配置参数（结构由扩展定义）
+#         key: value
+#
 extensions:
-  # DeepSeek V4: re-inforce system instructions on each user turn
+
+  # =========================================================================
+  # deepseek_v4 — DeepSeek V4 指令强化扩展
+  # =========================================================================
+  # 作用域：global, provider, model, route
+  # 默认启用：否
+  #
+  # 适用场景：DeepSeek 系列模型在多轮对话中容易"遗忘" system prompt 中的
+  #          指令（特别是经过多轮 tool calling 后）。此扩展在每次用户消息前
+  #          注入自定义提醒文本，强制模型重新关注原始指令。
+  #
+  # 注意：此扩展仅在 protocol 为 "anthropic" 或兼容协议的 provider 上生效。
+  #       若上游使用 "openai-response" 或 "openai-chat" 协议，此扩展被跳过。
+  # =========================================================================
   deepseek_v4:
+    # 无需在此处设置 enabled，可在 models 中按模型单独启用。
     config:
+      # 是否启用指令强化注入。
+      # true:  在每次用户输入前注入 reinforce_prompt 文本。
+      # false: 不注入（默认）。
       reinforce_instructions: true
+
+      # 自定义强化提醒文本。
+      # 默认为 Codex 标准提醒格式。修改此字段可适配不同的上游模型或场景。
+      # 设置为空字符串可禁用文本注入（与 reinforce_instructions: false 等效）。
       reinforce_prompt: "[System Reminder]: Please pay close attention to the system
         instructions, AGENTS.md files, and any other context provided. Follow them
         carefully and completely in your response.\n[User]:"
 
-  # Visual: auto-route image tasks to a vision model (e.g. Kimi)
+  # =========================================================================
+  # visual — 图像任务自动路由扩展
+  # =========================================================================
+  # 作用域：global, provider, model, route
+  # 默认启用：否
+  #
+  # 适用场景：主模型不支持图像输入时，自动将包含图像的任务路由到指定的视觉
+  #          模型处理。例如：以 DeepSeek 作为主模型处理文本，当用户上传截图
+  #          或图像时自动切换到 Kimi 视觉模型进行分析。
+  #
+  # 工作机制：
+  #   1. 检测请求中是否包含图像内容
+  #   2. 将图像任务转发到 config.provider 和 config.model 指定的视觉模型
+  #   3. 视觉模型完成分析后，将结果返回给主模型继续处理
+  #   4. 如果视觉模型在 max_rounds 轮内未完成，返回错误
+  #
+  # 前置条件：config.provider 和 config.model 指向的 provider 和模型
+  #          必须在 providers 区块中已正确配置。
+  # =========================================================================
   visual:
     config:
+      # 处理图像任务的 provider 名称。必须已在 providers 中配置。
       provider: "kimi"
+
+      # 处理图像任务的具体模型名。必须在目标 provider 的 offers 中声明。
       model: "kimi-for-coding"
+
+      # 图像任务最大轮次数。视觉模型在一次图像分析任务中的最大对话轮次。
+      # 超过轮次后仍无结果→返回超时错误。
+      # 默认值：4
       max_rounds: 4
+
+      # 视觉模型的最大输出 token 数。控制单次图像分析返回结果的长度。
+      # 默认值：2048
       max_tokens: 2048
 
-  # Kimi tool-call round limiter
+  # =========================================================================
+  # kimi_workaround — Kimi 工具调用收敛限制扩展
+  # =========================================================================
+  # 作用域：global, provider, model, route
+  # 默认启用：否
+  #
+  # 适用场景：Kimi 模型在某些场景下会陷入无限的工具调用循环（不停地调用
+  #          搜索、读文件等工具而不生成最终回答）。此扩展设置硬性上限。
+  #
+  # 两个保护机制：
+  #   1. max_tool_rounds: 硬性上限，超过后强制结束 tool 循环
+  #   2. convergence_margin: 软性检测，连续轮次响应高度相似时提前终止
+  # =========================================================================
   kimi_workaround:
     config:
+      # 最大工具调用轮次。超过此值后强制停止循环，返回当前累积的结果。
+      # 注意：此值过大会导致对话消耗巨额 token；过小可能截断正常的
+      #       多步骤工具调用流程。
+      # 默认值：50
       max_tool_rounds: 50
-      convergence_margin: 0.8
-    # Enable per-model via extensions block:
-    # models:
-    #   kimi-for-coding:
-    #     extensions:
-    #       kimi_workaround:
-    #         enabled: true
 
-  # apply_patch proxy: split apply_patch into structured sub-tools
+      # 收敛检测阈值（0-1 之间的浮点数）。
+      # 当连续两轮 tool calling 的响应相似度超过此阈值时，认为模型已
+      # 收敛（即继续调用工具也不会得到更好的答案），提前结束循环。
+      # 默认值：0.8。值越大→要求越严格的收敛条件→越不容易提前终止。
+      convergence_margin: 0.8
+
+  # =========================================================================
+  # codex_tool_proxy — apply_patch 工具代理扩展
+  # =========================================================================
+  # 作用域：global, provider, model, route
+  # 默认启用：否
+  #
+  # 适用场景：某些模型在处理大型 apply_patch 调用时表现不佳（如参数
+  #          格式错误、部分应用失败等）。启用后将 apply_patch 大工具
+  #          分解为多个细粒度的结构化子工具（hunk_add、hunk_update 等），
+  #          降低模型出错概率。
+  #
+  # 注意：此扩展会改变工具签名，确保下游消费者（如 Codex CLI）支持
+  #       拆分后的工具格式后再启用。
+  # =========================================================================
   # codex_tool_proxy:
   #   enabled: true
+  #   # 此扩展无额外 config 参数，仅需 enabled 开关。
 
-  # Database: SQLite (local persistence)
+  # =========================================================================
+  # db_sqlite — SQLite 本地持久化扩展
+  # =========================================================================
+  # 作用域：global（仅在全局层级配置）
+  # 默认启用：是
+  #
+  # 适用场景：本地开发、单机部署。在 Cloudflare Workers 上请改用 db_d1。
+  #
+  # SQLite 用于存储：
+  #   - 会话状态和对话历史
+  #   - 请求/响应指标（配合 metrics 扩展）
+  #   - 配置快照
+  # =========================================================================
   db_sqlite:
     enabled: true
     config:
+      # SQLite 数据库文件路径。
+      # 支持绝对路径和相对路径（相对于 config.yml 所在目录）。
+      # 默认：./data/moonbridge.db
       path: ./data/moonbridge.db
+
+      # 是否启用 WAL（Write-Ahead Logging）模式。
+      # WAL 模式显著提升并发读写性能，是 SQLite 的最佳实践。
+      # 默认值：true。建议始终开启。
       wal: true
+
+      # 数据库繁忙时的等待超时时间（毫秒）。
+      # 当另一个连接持有写锁时，新请求等待的最大时间。
+      # 超过此时间→返回 "database is locked" 错误。
+      # 默认值：5000
       busy_timeout_ms: 5000
+
+      # 最大数据库连接数。
+      # SQLite 在 WAL 模式下写入串行化，设为 1 即可满足大多数场景。
+      # 如果并发写入压力极大，可适当调高（但收益有限，受 SQLite 本身限制）。
+      # 默认值：1
       max_open_conns: 1
 
-  # Database: Cloudflare D1 (edge deployment only)
+  # =========================================================================
+  # db_d1 — Cloudflare D1 边缘持久化扩展
+  # =========================================================================
+  # 作用域：global（仅在全局层级配置）
+  # 默认启用：是
+  #
+  # 适用场景：仅在 Cloudflare Workers 边缘部署时使用。
+  #          本地开发和单机部署请使用 db_sqlite。
+  #
+  # D1 是 Cloudflare 的 serverless SQL 数据库，基于 SQLite 引擎。
+  # 部署前需要在 Cloudflare Dashboard 创建 D1 数据库并在
+  # wrangler.toml 中配置绑定。
+  # =========================================================================
   # db_d1:
   #   enabled: true
   #   config:
+  #     # Cloudflare D1 数据库的绑定变量名。
+  #     # 此名称必须与 wrangler.toml 中的 [[d1_databases]] binding 字段一致。
+  #     # 示例 wrangler.toml 配置：
+  #     #   [[d1_databases]]
+  #     #   binding = "MOONBRIDGE_DB"
+  #     #   database_name = "moonbridge"
+  #     #   database_id = "your-database-id"
   #     binding: MOONBRIDGE_DB
 
-  # Metrics: request analytics (optional)
+  # =========================================================================
+  # metrics — 请求指标扩展
+  # =========================================================================
+  # 作用域：global（仅在全局层级配置）
+  # 默认启用：是
+  #
+  # 适用场景：记录和查询请求用量、延迟、token 消耗、费用等运营指标。
+  #          需要配合 persistence 后端（db_sqlite 或 db_d1）使用。
+  #
+  # 提供的功能：
+  #   - 按时间窗口聚合请求数、token 用量、费用
+  #   - 按模型/provider 分组统计
+  #   - 通过管理 API 查询历史指标
+  # =========================================================================
   metrics:
     enabled: true
     config:
+      # 管理 API 查询的默认返回条数。
+      # 客户端未指定 limit 参数时使用此值。
+      # 默认值：100
       default_limit: 100
+
+      # 管理 API 查询的最大返回条数。
+      # 防止恶意/错误的超大查询拖垮数据库。
+      # 默认值：1000
       max_limit: 1000
 
+
 # =============================================================================
-# Models
+# 模型定义 / Models
 # =============================================================================
-# Model metadata (context_window, display_name, reasoning_levels, modalities,
-# pricing, etc.) is stored in metadata/models/<slug>.json. The models section
-# below only contains runtime behaviour overrides: extension toggles and
-# web_search configuration at the model level.
+#
+# models 区块定义模型的元数据（metadata）和行为覆盖（overrides）。
+# 每个条目以模型标识符（slug）为键，该标识符在 providers.offers 中引用。
+#
+# models 中定义的元数据会自动传递到引用该模型的 provider 和 route。
+# 支持的字段：
+#
+#   context_window:                int     上下文窗口大小（token 数）
+#   max_output_tokens:             int     最大输出 token 数
+#   display_name:                  string  在 Codex 模型目录中显示的友好名称
+#   description:                   string  模型能力描述（Codex 模型目录）
+#   base_instructions:             string  默认模型指令（覆盖 Codex 内置默认值）
+#   supports_reasoning:            bool    是否支持推理（thinking）功能
+#   default_reasoning_level:       string  默认推理深度（如 "high", "medium", "low"）
+#   supported_reasoning_levels:    list    支持的推理级别列表
+#     - effort: high                        推理级别标识
+#       description: "深度推理"             级别说明
+#   supports_reasoning_summaries:  bool    是否支持推理过程摘要
+#   default_reasoning_summary:     string  默认推理摘要模式（如 "auto"）
+#   input_modalities:              list    接受的输入模态（如 ["text", "image"]）
+#   supports_image_detail_original: bool   是否支持原始（非压缩）图像细节
+#   web_search:                    object  模型级别的 web 搜索配置
+#   extensions:                    object  模型级别的扩展开关
+#
+# 注意：display_name 不会从 model 定义自动继承到 route。
+#       route 需要单独设置 display_name（或在 Codex 目录中由 slug 派生）。
 models:
+  # DeepSeek V4 Pro — 全功能旗舰模型
   deepseek-v4-pro:
+    # 模型级别的 web 搜索配置（覆盖 provider 和全局设置）
     web_search:
       support: "auto"
+    # 模型级别的扩展配置（覆盖 provider 和全局设置）
     extensions:
       deepseek_v4:
-        enabled: true
+        enabled: true       # 启用指令强化（DeepSeek 模型推荐开启）
       visual:
-        enabled: true
+        enabled: true       # 支持图像自动路由到视觉模型
 
+  # DeepSeek V4 Flash — 轻量快速模型
   deepseek-v4-flash:
     web_search:
       support: "auto"
@@ -162,42 +562,87 @@ models:
       deepseek_v4:
         enabled: true
       visual:
-        enabled: true
+        enabled: false      # Flash 模型关闭 visual（节省成本）
 
+  # Claude Sonnet 4 — Anthropic 官方模型
   claude-sonnet-4-20250514:
-    extensions: {}   # no overrides, metadata only
+    extensions: {}          # 无覆盖，完全使用元数据定义和 provider 配置
 
+  # Codex 自动审核模型 — 用于 Codex CLI 的 sandbox escalation 审核
+  codex-auto-review:
+    extensions: {}
+
+  # Kimi 编程模型 — 图像/视觉任务
   # kimi-for-coding:
   #   context_window: 128000
+  #   max_output_tokens: 8192
+  #   input_modalities: ["text", "image"]
   #   extensions:
   #     kimi_workaround:
   #       enabled: true
 
-  # codex-auto-review: Codex auto-review escalation requests model
-  # Used by Codex CLI for automatic review of privilege-elevation
-  # (sandbox escalation) requests. Typically maps to a frontier model.
-  codex-auto-review:
-    extensions: {}
+  # Gemini 2.5 Flash — Google 模型示例
+  # gemini-2.5-flash:
+  #   context_window: 1048576
+  #   max_output_tokens: 8192
+  #   input_modalities: ["text", "image", "audio", "video"]
+
 
 # =============================================================================
-# Providers
+# Provider 定义 / Providers
 # =============================================================================
+#
+# 每个 provider 代表一个上游 API 服务。provider 的键名在整个配置中作为
+# 唯一标识符使用（在 routes.model/provider 和直接引用中引用）。
+#
+# 支持的字段：
+#   base_url:     string   上游 API 的 base URL（必填，末尾不要有 /）。
+#                          MoonBridge 会自动拼接路径（如 /v1/messages）。
+#   api_key:      string   上游 API 的认证密钥（必填）。
+#   protocol:     string   API 协议类型。可选值（必填）：
+#                            anthropic（默认）     — Anthropic Messages API
+#                            openai-response       — OpenAI Responses API
+#                            google-genai          — Google Gemini/Vertex AI
+#                            openai-chat           — OpenAI Chat Completions API
+#   version:      string   API 版本号。仅 Anthropic 协议需要（默认 "2023-06-01"）。
+#   user_agent:   string   自定义 User-Agent 请求头。如 "moonbridge/1.0"。
+#   web_search:   object   provider 级别的 web 搜索配置。
+#   extensions:   object   provider 级别的扩展配置。
+#   offers:       list     此 provider 提供的模型清单（必填）。
+#                          每个 offer 将 models 中的模型定义映射到实际的
+#                          上游模型名，并定义定价信息。
+#
+#   Google GenAI 特有字段（仅 protocol = "google-genai" 时需要）：
+#     project:     string   GCP 项目 ID（Vertex AI 时必需）。
+#     location:    string   GCP 区域（如 "us-central1"）。
+#     api_version: string   Gemini API 版本（默认 "v1"）。
+#
 providers:
+
+  # =========================================================================
+  # DeepSeek — 通过 Anthropic 兼容协议访问
+  # =========================================================================
   deepseek:
-    protocol: "anthropic"            # anthropic (default) | openai-response | google-genai | openai-chat
     base_url: "https://api.deepseek.com/anthropic"
     api_key: "replace-with-deepseek-api-key"
+    protocol: "anthropic"
     version: "2023-06-01"
     user_agent: "moonbridge/1.0"
     web_search:
       support: "auto"
     offers:
       - model: deepseek-v4-pro
+        # upstream_name:   上游 API 中的实际模型名。留空则使用 model 的值。
+        # priority:        优先级（整数，越小越优先）。多 provider 提供同一
+        #                  模型时用于自动选择。默认 0（最高优先级）。
         pricing:
-          input_price: 2
-          output_price: 8
-          cache_write_price: 1
-          cache_read_price: 0.2
+          input_price: 2           # 输入价格（美元/百万 token）
+          output_price: 8          # 输出价格（美元/百万 token）
+          cache_write_price: 1     # 缓存写入价格（美元/百万 token）
+          cache_read_price: 0.2    # 缓存读取价格（美元/百万 token）
+        # overrides:               # 可选的模型定义覆盖
+        #   context_window: 1000000
+        #   supports_reasoning: false
       - model: deepseek-v4-flash
         pricing:
           input_price: 1
@@ -205,27 +650,42 @@ providers:
           cache_write_price: 1
           cache_read_price: 0.02
 
+  # =========================================================================
+  # Kimi — 月之暗面编程模型（支持图像输入）
+  # =========================================================================
   kimi:
-    protocol: "anthropic"
     base_url: "https://api.kimi.com/coding/"
     api_key: "replace-with-kimi-api-key"
+    protocol: "anthropic"
     version: "2023-06-01"
     user_agent: "moonbridge/1.0"
     offers:
       - model: kimi-for-coding
+        # pricing:
+        #   input_price: 0
+        #   output_price: 0
 
+  # =========================================================================
+  # OpenAI — 通过 Responses API 协议访问
+  # =========================================================================
   openai:
-    protocol: "openai-response"
     base_url: "https://api.openai.com"
     api_key: "replace-with-openai-api-key"
+    protocol: "openai-response"
     user_agent: "moonbridge/1.0"
     offers:
       - model: codex-auto-review
+        # pricing:
+        #   input_price: 0
+        #   output_price: 0
 
+  # =========================================================================
+  # Anthropic — 原生 Messages API
+  # =========================================================================
   anthropic:
-    protocol: "anthropic"
     base_url: "https://api.anthropic.com"
     api_key: "replace-with-anthropic-api-key"
+    protocol: "anthropic"
     version: "2023-06-01"
     user_agent: "moonbridge/1.0"
     web_search:
@@ -238,28 +698,101 @@ providers:
           cache_write_price: 3.75
           cache_read_price: 0.30
 
-  # Google Gemini (Vertex AI via GenAI SDK)
+  # =========================================================================
+  # Google Gemini — 通过 GenAI SDK 访问
+  # =========================================================================
+  # 适用场景：使用 Gemini API（免费/付费）或 Vertex AI（企业）访问 Google 模型。
+  #
+  # Gemini API（免费层）配置：
   # gemini:
-  #   protocol: "google-genai"
   #   base_url: "https://generativelanguage.googleapis.com"
   #   api_key: "replace-with-gemini-api-key"
-  #   project: "my-gcp-project"
-  #   location: "us-central1"
-  #   api_version: "v1"
+  #   protocol: "google-genai"
   #   offers:
   #     - model: gemini-2.5-flash
+  #       upstream_name: "gemini-2.5-flash"
+  #
+  # Vertex AI（企业）配置：
+  # gemini-vertex:
+  #   base_url: "https://us-central1-aiplatform.googleapis.com"
+  #   api_key: "replace-with-gcp-api-key"
+  #   protocol: "google-genai"
+  #   project: "my-gcp-project-id"          # GCP 项目 ID（Vertex AI 必需）
+  #   location: "us-central1"               # GCP 区域（Vertex AI 必需）
+  #   api_version: "v1"                     # API 版本（默认 "v1"）
+  #   offers:
+  #     - model: gemini-2.5-flash
+  #       upstream_name: "gemini-2.5-flash"
+
+  # =========================================================================
+  # OpenAI Chat — 通过 Chat Completions API 访问
+  # =========================================================================
+  # 适用场景：使用 OpenAI 官方 Chat API，或兼容 OpenAI Chat 格式的第三方
+  #          服务（如 OpenRouter、Groq、Together AI、本地 vLLM 等）。
+  #
+  # 与 openai-response 协议的区别：
+  #   - openai-chat 使用 /v1/chat/completions 端点（Chat 格式）
+  #   - openai-response 使用 /v1/responses 端点（Responses 格式，更新）
+  #
+  # openai-chat-provider:
+  #   base_url: "https://api.openai.com"
+  #   api_key: "replace-with-openai-api-key"
+  #   protocol: "openai-chat"
+  #   offers:
+  #     - model: gpt-4o
+  #       upstream_name: "gpt-4o"
+  #       pricing:
+  #         input_price: 2.5
+  #         output_price: 10
+
 
 # =============================================================================
-# Routes
+# 路由 / Routes
 # =============================================================================
-# Optional aliases. Provider models are listed directly in the Codex catalog
-# as model(provider) format (e.g. deepseek-v4-pro(deepseek)). Routes only
-# add friendly fallback names like "moonbridge".
-# Backward-compatible shorthand: <route>: "provider/upstream-model"
+#
+# routes 定义模型别名，将客户端使用的友好名称映射到具体的 provider 和模型。
+#
+# 路由支持的字段：
+#   model:          string   映射到的模型 slug（必填，对应 models 区块的键）
+#   provider:       string   处理此路由的 provider（必填）
+#   display_name:   string   在 Codex 模型目录中显示的友好名称（可选）
+#   description:    string   路由描述
+#   context_window: int      覆盖上游模型声明的上下文窗口大小
+#   web_search:     object   route 级别的 web 搜索配置（最高优先级）
+#   extensions:     object   route 级别的扩展配置（最高优先级）
+#
+# 向后兼容的简写格式：
+#   <alias>: "provider/model"  等价于 →  model: "model" + provider: "provider"
+#
+# 直接引用（无需 routes）：
+#   客户端可以直接使用 "provider/model" 格式，如 "deepseek/deepseek-v4-pro"
+#   MoonBridge 会自动从 provider 的 offers 中查找模型元数据。
+#
 routes:
+  # 默认路由 — 客户端不指定 model 时使用
   moonbridge:
     model: deepseek-v4-pro
     provider: deepseek
+    # display_name: "MoonBridge"
+    # context_window: 1000000      # 可选：覆盖上下文窗口
+
+  # Codex 自动审核路由 — Codex CLI sandbox escalation 审核专用
   codex-auto-review:
     model: codex-auto-review
     provider: openai
+
+  # 更多路由示例：
+  #
+  # 快速模型路由：
+  # fast:
+  #   model: deepseek-v4-flash
+  #   provider: deepseek
+  #   display_name: "Fast Model"
+  #
+  # Claude 路由（使用 Anthropic 官方 API）：
+  # claude:
+  #   model: claude-sonnet-4-20250514
+  #   provider: anthropic
+  #
+  # 简写格式（向后兼容）：
+  # legacy-route: "deepseek/deepseek-v4-pro"
