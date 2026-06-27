@@ -81,6 +81,48 @@ func TestResponseJSONIncludesZeroCachedTokensWhenDetailsPresent(t *testing.T) {
 	}
 }
 
+func TestResponseJSONAlwaysIncludesInputAndOutputTokens(t *testing.T) {
+	// Regression: when a chat-protocol upstream reports no prompt_tokens,
+	// InputTokens is 0. With omitempty the field was dropped from
+	// response.completed, and codex failed with "missing field `input_tokens`",
+	// treating it as a stream disconnect and retrying until it gave up.
+	// input_tokens / output_tokens must always be present, even at 0.
+	response := openai.Response{
+		ID:     "resp_123",
+		Object: "response",
+		Status: "completed",
+		Output: []openai.OutputItem{},
+		Usage: openai.Usage{
+			InputTokens:  0,
+			OutputTokens: 71,
+			TotalTokens:  71,
+		},
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	usage, ok := decoded["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("usage missing: %#v", decoded["usage"])
+	}
+	if _, ok := usage["input_tokens"]; !ok {
+		t.Fatalf("input_tokens missing from usage (must be present even when 0): %#v", usage)
+	}
+	if v, ok := usage["input_tokens"].(float64); !ok || v != 0 {
+		t.Fatalf("input_tokens = %v, want 0", usage["input_tokens"])
+	}
+	if _, ok := usage["output_tokens"]; !ok {
+		t.Fatalf("output_tokens missing from usage (must be present even when 0): %#v", usage)
+	}
+}
+
 func TestToolJSONIncludesExplicitStrictFalse(t *testing.T) {
 	strict := false
 	tool := openai.Tool{

@@ -116,8 +116,13 @@ type ContentPart struct {
 
 // Usage represents token usage statistics.
 type Usage struct {
-	InputTokens         int                 `json:"input_tokens,omitempty"`
-	OutputTokens        int                 `json:"output_tokens,omitempty"`
+	// InputTokens and OutputTokens are required fields of the OpenAI Responses
+	// API usage object. They MUST always be serialized (no omitempty): clients
+	// like codex deserialize response.completed with a strict, non-optional
+	// input_tokens field, and dropping it when zero causes
+	// "missing field `input_tokens`" → stream-disconnect retry loops.
+	InputTokens         int                 `json:"input_tokens"`
+	OutputTokens        int                 `json:"output_tokens"`
 	TotalTokens         int                 `json:"total_tokens"`
 	InputTokensDetails  InputTokensDetails  `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails OutputTokensDetails `json:"output_tokens_details,omitempty"`
